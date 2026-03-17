@@ -10,7 +10,7 @@
 From `studi_kasus.txt`:
 
 | Requirement             | Exact Wording |
-| ----------------------- | -- |
+| -- | -- |
 | Simulation only         | "No physical hardware is required. Participants can use a 2D grid or a simple Python-based environment."                                                                   |
 | MCP mandatory           | "All communication between the Agent (the LLM) and the Drones (the code) must be handled via the Model Context Protocol (MCP). Hard-coding drone movements is prohibited." |
 | Chain-of-Thought        | "The agent explains its logic before executing the tools."                                                                                                                 |
