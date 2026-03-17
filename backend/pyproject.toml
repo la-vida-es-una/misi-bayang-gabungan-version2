@@ -1,20 +1,30 @@
 [project]
-name = "backend"
+name = "sar-swarm-backend"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.14"
+description = "Offline SAR swarm backend — MCP-first architecture"
+requires-python = ">=3.11"
+
 dependencies = [
+  # LangChain stack
   "langchain>=0.3.0",
-  "langchain-openai>=0.3.0",
-  "langchain-ollama>=0.3.0",
+  "langchain-openai>=0.3.0", # used against Ollama OpenAI-compat endpoint
+  "langchain-ollama>=0.3.0", # kept for direct Ollama fallback
   "langchain-core>=0.3.0",
-  "python-dotenv>=1.0.0",
-  "colorama>=0.4.6",
+  # MCP + API
   "fastmcp>=2.0.0",
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
+  # Utilities
+  "shapely>=2.0.0",
+  "numpy>=1.26.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.0.0",
+  "python-dotenv>=1.0.0",
+  "colorama>=0.4.6",
 ]
 
-[dependency-groups]
-dev = ["pytest>=9.0.2", "pytest-asyncio>=1.3.0"]
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.23.0", "ruff>=0.4.0"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
