@@ -305,7 +305,9 @@ class CommandAgent:
                     self._window.get(drone_id).add_waypoints([(x, y)])
                     tick = self._tick_ref[0]
                     log_tool_result(tick, "move_to", args)
-                    print(f"{Fore.GREEN}[tick={tick}] ✅ move_to {args}{Style.RESET_ALL}")
+                    print(
+                        f"{Fore.GREEN}[tick={tick}] ✅ move_to {args}{Style.RESET_ALL}"
+                    )
 
         # Append new turns to history, keep last 20 messages
         self._history.append(HumanMessage(content=user_message))

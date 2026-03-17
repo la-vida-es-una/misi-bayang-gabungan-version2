@@ -77,7 +77,9 @@ class Grid:
 
     # ── Coverage tracking ─────────────────────────────────────────────────────
 
-    def mark_scanned(self, col: int, row: int, radius: int = 2) -> list[tuple[int, int]]:
+    def mark_scanned(
+        self, col: int, row: int, radius: int = 2
+    ) -> list[tuple[int, int]]:
         """
         Mark all zone cells within `radius` of (col, row) as covered.
         Returns newly covered cells.
@@ -132,7 +134,12 @@ class Grid:
         return lon, lat
 
     def all_zone_cells(self) -> list[tuple[int, int]]:
-        return [(c, r) for r in range(self.rows) for c in range(self.cols) if self._zone_mask[r, c]]
+        return [
+            (c, r)
+            for r in range(self.rows)
+            for c in range(self.cols)
+            if self._zone_mask[r, c]
+        ]
 
     def uncovered_zone_cells(self) -> list[tuple[int, int]]:
         return [

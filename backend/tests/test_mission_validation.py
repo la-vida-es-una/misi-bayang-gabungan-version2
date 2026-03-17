@@ -26,32 +26,22 @@ Run:
 
 from __future__ import annotations
 
-import asyncio
 import math
-import random
-import time
 from dataclasses import asdict
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from world.engine import WorldEngine, BATTERY_LOW_THRESHOLD
+from agent.pathfinder import straight_line_path
+from agent.window import REPLAN_THRESHOLD, WindowManager
+from world.engine import BATTERY_LOW_THRESHOLD, WorldEngine
 from world.grid import Grid
 from world.models import (
-    BatteryLowEvent,
-    DroneArrivedEvent,
     DroneMovedEvent,
-    MissionEndedEvent,
-    MissionPausedEvent,
     MissionPhase,
     MissionResumedEvent,
     SurvivorFoundEvent,
-    SurvivorStatus,
-    ZoneCoveredEvent,
 )
-from agent.pathfinder import straight_line_path
-from agent.window import WindowManager, REPLAN_THRESHOLD
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 

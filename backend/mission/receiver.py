@@ -162,7 +162,9 @@ async def _agent_loop(mission_text: str, base_col: int, base_row: int) -> None:
 # ── Survivor auto-seed ────────────────────────────────────────────────────────
 
 
-def _seed_survivors(engine: WorldEngine, grid: Grid, count: int) -> list[dict[str, Any]]:
+def _seed_survivors(
+    engine: WorldEngine, grid: Grid, count: int
+) -> list[dict[str, Any]]:
     """Randomly place `count` survivors in in-bounds cells, avoiding base."""
     all_cells = [
         (c, r)
@@ -277,7 +279,9 @@ async def add_zone(req: ZoneRequest) -> dict[str, Any]:
     if engine is None or grid is None:
         raise HTTPException(400, "No active mission")
     if engine.phase != MissionPhase.PAUSED:
-        raise HTTPException(400, f"Can only add zone while PAUSED, current: {engine.phase.value}")
+        raise HTTPException(
+            400, f"Can only add zone while PAUSED, current: {engine.phase.value}"
+        )
 
     flipped = _flip_polygon(req.geojson_polygon)
     zone_info = grid.set_zone(flipped)

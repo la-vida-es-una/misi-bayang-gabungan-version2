@@ -88,7 +88,9 @@ class WorldEngine:
             if self.phase == MissionPhase.ENDED:
                 return []
             self.phase = MissionPhase.ENDED
-            found = sum(1 for s in self._survivors.values() if s.status == SurvivorStatus.FOUND)
+            found = sum(
+                1 for s in self._survivors.values() if s.status == SurvivorStatus.FOUND
+            )
             total = len(self._survivors)
             return [
                 MissionEndedEvent(
@@ -100,7 +102,9 @@ class WorldEngine:
 
     # ── MCP action entry points ───────────────────────────────────────────────
 
-    def assign_path(self, drone_id: str, waypoints: list[tuple[int, int]]) -> list[WorldEvent]:
+    def assign_path(
+        self, drone_id: str, waypoints: list[tuple[int, int]]
+    ) -> list[WorldEvent]:
         events: list[WorldEvent] = []
         with self._lock:
             drone = self._drones.get(drone_id)
@@ -111,7 +115,9 @@ class WorldEngine:
                 if self.grid.in_bounds(col, row):
                     valid.append((col, row))
                 else:
-                    events.append(OutOfBoundsRejectedEvent(drone_id=drone_id, col=col, row=row))
+                    events.append(
+                        OutOfBoundsRejectedEvent(drone_id=drone_id, col=col, row=row)
+                    )
             if valid:
                 drone.path.extend(valid)
                 drone.status = DroneStatus.MOVING
@@ -209,9 +215,14 @@ class WorldEngine:
 
             if not drone.path:
                 drone.status = DroneStatus.IDLE
-                events.append(DroneArrivedEvent(drone_id=drone.id, col=next_col, row=next_row))
+                events.append(
+                    DroneArrivedEvent(drone_id=drone.id, col=next_col, row=next_row)
+                )
 
-            if drone.battery <= BATTERY_LOW_THRESHOLD and drone.id not in self._low_battery_fired:
+            if (
+                drone.battery <= BATTERY_LOW_THRESHOLD
+                and drone.id not in self._low_battery_fired
+            ):
                 self._low_battery_fired.add(drone.id)
                 events.append(BatteryLowEvent(drone_id=drone.id, battery=drone.battery))
 
