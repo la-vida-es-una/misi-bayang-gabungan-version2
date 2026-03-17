@@ -1,0 +1,85 @@
+Study Case 3: First Responder of the Future – Decentralised Swarm Intelligence
+Track: Agentic AI (Decentralised Swarm Intelligence) 
+Primary Goal: 
+  - SDG 9:
+  Industry, Innovation, and Infrastructure (Target 9.1 & 9.5) 
+  - SDG 3: Good Health
+  and Well-being (Target 3.d )
+1. Real-World Context The ASEAN region, situated on the Paciﬁc Ring of Fire,
+   is highly vulnerable to super typhoons and earthquakes. In the critical
+   ﬁrst 72 hours, terrestrial communication (cell towers and internet) often
+   suffers catastrophic failure, creating a "communication blackout." Standard
+   AI models that depend on the cloud become useless. This case study
+   challenges you to build a "self-healing" rescue swarm that operates as a
+   collective brain at the edge, ensuring aid reaches survivors even when the
+   world is offline.
+2. Problem Statement Current rescue models rely on high-bandwidth cloud
+   connectivity for processing and coordination. When infrastructure
+   collapses, these centralized systems fail. There is an urgent need for an
+   Autonomous Command Agent that can operate at the edge to orchestrate a ﬂeet
+   of rescue drones. This system must be capable of mapping disaster zones,
+   detecting survivors using on-device Al, and efficiently managing drone
+   resources through a standardized Model Context Protocol (MCP) to ensure aid
+   reaches survivors even without human pilots or cloud access.
+3. Technical Challenge & Sub-tasks
+  - Autonomous Mission Planning: Develop a central "Command Agent" capable of
+    decomposing a high-level goal (e.g., "Scan the South-East quadrant for
+    thermal signatures") into speciﬁc, sequenced tool calls.
+  - MCP Tool Integration: Build an MCP server that exposes drone functions,such
+    as move_to(x,y), get_battery_status(), and thermal_scan(),as standardized
+    tools for the agent to use.
+  - Strategic Resource Management: Implement reasoning logic so the agent
+    manages multiple drones effectively, ensuring search coverage is optimized
+    and drones are recalled for "charging" (simulated) before battery failure. 
+  - Real-time Tool Discovery: The agent must not have hard-coded drone IDs. It
+    must use the MCP discovery mechanism to "see" which drones are active on
+    the network and adapt its plan based on the available ﬂeet.
+4. Technical Feasibility & Constraints
+  - Simulation-Only: This is a software simulation. No physical hardware is
+    required. Participants can use a 2D grid or a simple Python-based
+    environment to represent the disaster zone.
+  - Mandatory Protocol: All communication between the Agent (the LLM) and the
+    Drones (the code) must be handled via the Model Context Protocol (MCP).
+    Hard-coding drone movements is prohibited.
+  - Agentic Reasoning: The system must demonstrate "Chain-of-Thought"
+    reasoning, where the agent explains its logic (e.g., "Drone A has 20%
+    battery, so I am assigning the closer Sector 1 to it while sending Drone B
+    to the further Sector 5") before executing the tools.
+5. Recommended Data Sources & Toolkits
+  - Suggested Simulation Environments: Mesa or a FastAPI mock environment.
+  - Suggested Agent Frameworks: LangChain, Microsoft AutoGen, or Vercel AI SDK.
+  - Suggested Connector: MCP Python SDK.
+6. Expected Deliverables
+   - The Orchestrator: A functional AI agent capable of managing a simulated
+     ﬂeet of at least 3-5 drones.
+   - MCP Server Implementation: The code for the MCP server that exposes the
+     drone "tools" to the agent.
+   - Mission Log: A demonstration showing the agent's step-by-step reasoning
+     and its successful completion of a search-and-rescue mission.
+
+7. Reference Section 
+  - The Protocol
+    1. “Introduction - Model Context Protocol,” Modelcontextprotocol.io, 2025.
+    https://modelcontextprotocol.io/introduction
+    2. modelcontextprotocol, “GitHub - modelcontextprotocol/python-sdk: The
+    official Python SDK for Model Context Protocol servers and clients,”
+    GitHub, Mar. 14, 2025. https://github.com/modelcontextprotocol/python-sdk
+    3. jlowin, “GitHub - jlowin/fastmcp: The fast, Pythonic way to build MCP
+    servers and clients,” GitHub, Oct. 26, 2025.
+    https://github.com/jlowin/fastmcp
+    4. langchain-ai, “GitHub - langchain-ai/langchain-mcp-adapters: LangChain
+    MCP,” GitHub, Dec. 09, 2025.
+    https://github.com/langchain-ai/langchain-mcp-adapters (accessed Feb. 11,
+    2026).
+  - Simulation & Environment
+    1. “Mesa: Agent-based modeling in Python — Mesa .1 documentation,”
+    Readthedocs.io, 2025. https://mesa.readthedocs.io/
+  - Agent Frameworks
+    1. crewAI Inc, “Home,” crewai.com. https://docs.crewai.com/
+    2. “autogen_ext.tools.mcp — AutoGen,” Github.io, 2024.
+    https://microsoft.github.io/autogen/stable/reference/python/aut
+    ogen_ext.tools.mcp.html (accessed Feb. 11, 2026).
+  - Vercel AI SDK
+    1. “AI SDK by Vercel,” Ai-sdk.dev, 2025.
+    https://ai-sdk.dev/docs/introduction
+
