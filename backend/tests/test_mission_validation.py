@@ -55,31 +55,34 @@ from agent.window import WindowManager, REPLAN_THRESHOLD
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
-# A small but realistic polygon over the Borneo test area
-# Coordinates in [lon, lat] (internal convention)
+# ── Test polygons ─────────────────────────────────────────────────────────────
+# Coordinates are in plain units (not geographic degrees).
+# Grid.cell_size_m=1.0 → each unit = 1 cell.
+# Master: 20×20 area.  Zone1: left half.  Zone2: right half.
+# All zones are strict subsets of master so containment always holds.
+
 MASTER_POLYGON = {
     "type": "Polygon",
     "coordinates": [
         [
-            [117.570, 3.315],
-            [117.590, 3.315],
-            [117.590, 3.335],
-            [117.570, 3.335],
-            [117.570, 3.315],
+            [0.0, 0.0],
+            [20.0, 0.0],
+            [20.0, 20.0],
+            [0.0, 20.0],
+            [0.0, 0.0],
         ]
     ],
 }
 
-# A zone polygon — subset of master (inner rectangle)
 ZONE_1_POLYGON = {
     "type": "Polygon",
     "coordinates": [
         [
-            [117.572, 3.317],
-            [117.582, 3.317],
-            [117.582, 3.327],
-            [117.572, 3.327],
-            [117.572, 3.317],
+            [1.0, 1.0],
+            [9.0, 1.0],
+            [9.0, 9.0],
+            [1.0, 9.0],
+            [1.0, 1.0],
         ]
     ],
 }
@@ -88,20 +91,20 @@ ZONE_2_POLYGON = {
     "type": "Polygon",
     "coordinates": [
         [
-            [117.582, 3.317],
-            [117.588, 3.317],
-            [117.588, 3.327],
-            [117.582, 3.327],
-            [117.582, 3.317],
+            [11.0, 1.0],
+            [19.0, 1.0],
+            [19.0, 9.0],
+            [11.0, 9.0],
+            [11.0, 1.0],
         ]
     ],
 }
 
 
-def make_grid(cell_size_m: float = 50.0) -> Grid:
+def make_grid(cell_size_m: float = 1.0) -> Grid:
     """
-    Use 50 m cells so the grid is small enough to fully scan in a test.
-    The cell_size_m param proves the system is not hardcoded to 1 m.
+    cell_size_m=1.0 with integer-unit coordinates → 1 unit = 1 cell.
+    Master polygon is 20×20 = 400 cells. Fast to build, easy to reason about.
     """
     return Grid(MASTER_POLYGON, cell_size_m=cell_size_m)
 
@@ -112,11 +115,13 @@ def _first_cell(grid: Grid) -> tuple[int, int]:
         for c in range(grid.cols):
             if grid.in_bounds(c, r):
                 return c, r
-    raise RuntimeError("Grid has no in-bounds cells — check MASTER_POLYGON")
+    raise RuntimeError(
+        "Grid has no in-bounds cells — polygon too small for cell_size_m"
+    )
 
 
-def make_engine(cell_size_m: float = 50.0) -> WorldEngine:
-    grid = make_grid(cell_size_m)
+def make_engine(cell_size_m: float = 1.0) -> WorldEngine:
+    grid = make_grid(cell_size_m=cell_size_m)
     base_col, base_row = _first_cell(grid)
     return WorldEngine(grid=grid, base_col=base_col, base_row=base_row)
 
@@ -172,8 +177,14 @@ class TestV1_NoTeleportation:
         engine.add_drone("d1")
         engine.start()
 
-        # Diagonal path via Bresenham — each step is still 1 cell
-        path = straight_line_path(1, 1, 6, 6)
+        # Build path manually — guaranteed horizontal, 1 col per step, no diagonals.
+        # Do NOT use straight_line_path here: Bresenham on a diagonal would produce
+        # steps where both col and row change, which is correct behaviour but would
+        # confuse a Chebyshev=1 assertion designed to catch real teleportation.
+        # Start from the drone's actual position (base_col, base_row).
+        bc, br = engine.base_col, engine.base_row
+        path = [(bc + i, br) for i in range(1, 9) if engine.grid.in_bounds(bc + i, br)]
+        assert len(path) >= 3, "Not enough in-bounds cells for horizontal path"
         engine.assign_path("d1", path)
 
         all_events = run_ticks(engine, max_ticks=50)
@@ -310,7 +321,9 @@ class TestV3_SurvivorLifecycle:
     def test_thermal_scan_transitions_missing_to_found(self) -> None:
         engine = make_engine()
         engine.add_drone("d1")
-        engine.add_survivor("s1", col=2, row=1)  # within scan radius of (1,1)
+        # Place survivor at same cell as drone (col=0,row=0) — guaranteed within radius=2
+        base_col, base_row = engine.base_col, engine.base_row
+        engine.add_survivor("s1", col=base_col, row=base_row)
         engine.start()
 
         events = engine.thermal_scan("d1")
@@ -395,8 +408,16 @@ class TestV4_BatteryRecall:
         engine.add_drone("d1")
         engine.start()
 
-        long_path = [(c, 1) for c in range(2, 40)]
-        engine.assign_path("d1", long_path)
+        # Build a path long enough to drain battery below threshold.
+        # BATTERY_DRAIN_PER_MOVE=0.5, threshold=25 → need >150 moves from 100%.
+        # Snake across the 20×20 grid: 20 rows × 18 steps = 360 moves.
+        path: list[tuple[int, int]] = []
+        for row in range(1, 20):
+            cols = range(1, 19) if row % 2 == 1 else range(18, 0, -1)
+            for col in cols:
+                if engine.grid.in_bounds(col, row):
+                    path.append((col, row))
+        engine.assign_path("d1", path)
 
         all_events = run_ticks(engine, max_ticks=500)
         low_events = events_of(all_events, "battery_low")
@@ -419,8 +440,14 @@ class TestV4_BatteryRecall:
         engine.add_drone("d1")
         engine.start()
 
-        long_path = [(c, 1) for c in range(2, 40)]
-        engine.assign_path("d1", long_path)
+        # Same long snake path as above
+        path: list[tuple[int, int]] = []
+        for row in range(1, 20):
+            cols = range(1, 19) if row % 2 == 1 else range(18, 0, -1)
+            for col in cols:
+                if engine.grid.in_bounds(col, row):
+                    path.append((col, row))
+        engine.assign_path("d1", path)
 
         all_events = run_ticks(engine, max_ticks=500)
         low_events = events_of(all_events, "battery_low")
@@ -493,7 +520,7 @@ class TestV5_ZoneCoverage:
         AND all drones have returned to base.
         This is the core auto-pause contract.
         """
-        engine = make_engine(cell_size_m=200.0)  # very large cells → few cells in zone
+        engine = make_engine(cell_size_m=5.0)  # larger cells → fewer cells in zone
         engine.add_drone("d1")
         engine.start()
 
@@ -501,10 +528,12 @@ class TestV5_ZoneCoverage:
         grid.set_zone(ZONE_1_POLYGON)
 
         # Force all zone cells covered by scanning from each cell
+        all_events: list[dict[str, Any]] = []
         for col, row in grid.all_zone_cells():
             engine._drones["d1"].col = col
             engine._drones["d1"].row = row
-            engine.thermal_scan("d1")
+            scan_events = engine.thermal_scan("d1")
+            all_events.extend(asdict(e) for e in scan_events)  # type: ignore[arg-type]
 
         # Return drone to base
         path_home = straight_line_path(
@@ -514,7 +543,8 @@ class TestV5_ZoneCoverage:
             engine.base_row,
         )
         engine.assign_path("d1", path_home)
-        all_events = run_ticks(engine, max_ticks=500)
+        tick_events = run_ticks(engine, max_ticks=500)
+        all_events.extend(tick_events)
 
         zone_covered = events_of(all_events, "zone_covered")
         mission_paused = events_of(all_events, "mission_paused")
@@ -526,15 +556,14 @@ class TestV5_ZoneCoverage:
         )
 
     def test_pause_does_not_fire_if_drone_not_at_base(self) -> None:
-        engine = make_engine(cell_size_m=200.0)
+        engine = make_engine()
         engine.add_drone("d1")
         engine.start()
 
         grid = engine.grid
+        grid.set_zone(ZONE_1_POLYGON)
         zone_cells = grid.all_zone_cells()
-        if not zone_cells:
-            grid.set_zone(MASTER_POLYGON)
-            zone_cells = grid.all_zone_cells()
+        assert zone_cells, "ZONE_1_POLYGON produced no cells"
 
         for col, row in zone_cells:
             grid.mark_scanned(col, row, radius=0)
@@ -569,16 +598,11 @@ class TestV5_ZoneCoverage:
 
 class TestV6_MultiZone:
     def test_new_zone_resets_coverage(self) -> None:
-        grid = make_grid(cell_size_m=200.0)
+        grid = make_grid()
         grid.set_zone(ZONE_1_POLYGON)
-
         zone_1_cells = grid.all_zone_cells()
-        if not zone_1_cells:
-            # At 200 m cells the zone polygon may produce 0 cells — use master cells
-            grid.set_zone(MASTER_POLYGON)
-            zone_1_cells = grid.all_zone_cells()
+        assert zone_1_cells, "ZONE_1_POLYGON produced no cells"
 
-        # Cover every cell with radius=0 (exact hit, no overshoot ambiguity)
         for col, row in zone_1_cells:
             grid.mark_scanned(col, row, radius=0)
 
@@ -587,11 +611,8 @@ class TestV6_MultiZone:
             "Coverage tracking is broken."
         )
 
-        # Set zone 2 — coverage must reset
         grid.set_zone(ZONE_2_POLYGON)
-        # If zone 2 also has 0 cells at this resolution, use a different sub-polygon
-        if not grid.all_zone_cells():
-            grid.set_zone(MASTER_POLYGON)
+        assert grid.all_zone_cells(), "ZONE_2_POLYGON produced no cells"
 
         assert not grid.zone_fully_covered(), (
             "Zone 2 reported covered immediately after being set. "
@@ -608,18 +629,12 @@ class TestV6_MultiZone:
         assert grid.zone_index == 2
 
     def test_resume_after_pause_transitions_phase(self) -> None:
-        engine = make_engine(cell_size_m=200.0)
+        engine = make_engine()
         engine.add_drone("d1")
 
-        # Set zone and start
+        engine.grid.set_zone(ZONE_1_POLYGON)
+        assert engine.grid.all_zone_cells(), "ZONE_1_POLYGON produced no cells"
         grid = engine.grid
-        zone_cells = grid.all_zone_cells()
-        if not zone_cells:
-            grid.set_zone(MASTER_POLYGON)
-        else:
-            grid.set_zone(ZONE_1_POLYGON)
-            if not grid.all_zone_cells():
-                grid.set_zone(MASTER_POLYGON)
 
         engine.start()
         assert engine.phase == MissionPhase.RUNNING
@@ -638,9 +653,8 @@ class TestV6_MultiZone:
         )
 
         # Add zone 2 and resume
-        grid.set_zone(ZONE_2_POLYGON)
-        if not grid.all_zone_cells():
-            grid.set_zone(MASTER_POLYGON)
+        engine.grid.set_zone(ZONE_2_POLYGON)
+        assert engine.grid.all_zone_cells(), "ZONE_2_POLYGON produced no cells"
 
         events = engine.start()
         resumed = [e for e in events if isinstance(e, MissionResumedEvent)]
@@ -650,7 +664,7 @@ class TestV6_MultiZone:
 
     def test_world_ticks_stop_during_pause(self) -> None:
         """step() must be a no-op when paused."""
-        engine = make_engine(cell_size_m=200.0)
+        engine = make_engine()
         engine.add_drone("d1")
         engine.grid.set_zone(ZONE_1_POLYGON)
         engine.start()
