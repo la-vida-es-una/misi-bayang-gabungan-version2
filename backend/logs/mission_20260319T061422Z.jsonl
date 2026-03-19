@@ -1,0 +1,4 @@
+{"kind": "mission", "message": "[Supervisor] Mission start: Scan zones for survivors.", "ts": "2026-03-19T06:14:22.752563+00:00"}
+{"kind": "cot", "tick": 0, "thought": "[Supervisor input] Mission: Scan zones for survivors.\nBase is at cell (10, 13).\nBegin by discovering the fleet and checking zone statuses.\nRemember: Use delegate_task() to assign work to drone workers.", "ts": "2026-03-19T06:14:22.752655+00:00"}
+{"kind": "mission", "message": "[Supervisor] Mission start: Scan zones for survivors.", "ts": "2026-03-19T06:15:45.140011+00:00"}
+{"kind": "cot", "tick": 0, "thought": "[Supervisor input] Mission: Scan zones for survivors.\nBase is at cell (13, 13).\nBegin by discovering the fleet and checking zone statuses.\nRemember: Use delegate_task() to assign work to drone workers.", "ts": "2026-03-19T06:15:45.140127+00:00"}

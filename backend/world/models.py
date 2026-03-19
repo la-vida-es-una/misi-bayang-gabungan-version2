@@ -195,7 +195,7 @@ class AgentToolCallEvent:
     type: Literal["agent_tool_call"] = "agent_tool_call"
     tick: int = 0
     tool: str = ""
-    args: dict = field(default_factory=dict)
+    args: dict = field(default_factory=dict)  # pyright: ignore[reportMissingTypeArgument]
 
 
 @dataclass
@@ -205,7 +205,7 @@ class AgentToolResultEvent:
     type: Literal["agent_tool_result"] = "agent_tool_result"
     tick: int = 0
     tool: str = ""
-    result: dict = field(default_factory=dict)
+    result: dict = field(default_factory=dict)  # pyright: ignore[reportMissingTypeArgument]
 
 
 @dataclass

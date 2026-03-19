@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-
 WINDOW_SIZE = 3  # total waypoints in window
 REPLAN_THRESHOLD = 1  # replan when remaining waypoints ≤ this
 

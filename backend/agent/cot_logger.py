@@ -41,7 +41,7 @@ def _emit(record: dict[str, Any]) -> None:
     """Write a single JSON object to the JSONL file."""
     record["ts"] = datetime.now(timezone.utc).isoformat()
     line = json.dumps(record, ensure_ascii=False)
-    _jsonl_file.write(line + "\n")
+    _ = _jsonl_file.write(line + "\n")
     _jsonl_file.flush()
 
 

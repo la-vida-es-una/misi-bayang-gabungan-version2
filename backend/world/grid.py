@@ -26,7 +26,7 @@ class ZoneState:
 
     zone_id: str
     label: str
-    polygon: dict  # original GeoJSON polygon (for serialisation)
+    polygon: dict  # original GeoJSON polygon (for serialisation)  # pyright: ignore[reportMissingTypeArgument]
     mask: np.ndarray = field(repr=False)  # bool[rows, cols] — cells in this zone
     covered: np.ndarray = field(repr=False)  # bool[rows, cols] — cells scanned
     status: ZoneStatus = ZoneStatus.IDLE
@@ -52,7 +52,7 @@ class ZoneState:
             return False
         return bool((self.mask & ~self.covered).sum() == 0)
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict:  # pyright: ignore[reportMissingTypeArgument]
         return {
             "zone_id": self.zone_id,
             "label": self.label,

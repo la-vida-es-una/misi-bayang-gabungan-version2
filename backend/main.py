@@ -11,17 +11,16 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-
 from collections.abc import AsyncIterator
 
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from mission.receiver import router as mission_router
 from mcp_server.server import mcp
+from mission.receiver import router as mission_router
 
-load_dotenv()
+_ = load_dotenv()
 
 # ── Structured logging ────────────────────────────────────────────────────────
 # LOG_LEVEL env var controls verbosity: DEBUG, INFO (default), WARNING, ERROR

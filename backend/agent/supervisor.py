@@ -18,18 +18,19 @@ import uuid
 from typing import Any
 
 from colorama import Fore, Style
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.agent import AgentState
+
+# from langchain_core.agent import AgentState
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from agent.cot_logger import log_mission, log_reasoning, log_tool_call, log_tool_result
+from agent.cot_logger import log_mission, log_reasoning, log_tool_call
 from agent.messages import TaskMessage, TaskResult, TaskStatus
 from world.engine import WorldEngine
-from world.models import AgentThinkingEvent, AgentToolCallEvent, AgentToolResultEvent
+from world.models import AgentThinkingEvent, AgentToolCallEvent
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
@@ -138,7 +139,7 @@ class SupervisorAgent:
             middleware=[CoTMiddleware(self._tick_ref)],
         )
 
-    def _build_tools(self) -> list:
+    def _build_tools(self) -> list:  # pyright: ignore[reportMissingTypeArgument]
         """Build supervisor-specific tools."""
         engine = self.engine
         task_queues = self._task_queues

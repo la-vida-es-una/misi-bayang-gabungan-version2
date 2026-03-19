@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from typing import final
 
 from colorama import Fore, Style
 
@@ -22,6 +23,7 @@ from world.engine import WorldEngine
 logger = logging.getLogger("sar.multi_agent")
 
 
+@final
 class MultiAgentOrchestrator:
     """
     Coordinates supervisor and worker agents.
@@ -79,7 +81,7 @@ class MultiAgentOrchestrator:
 
         print(
             f"{Fore.MAGENTA}[MultiAgent] Starting supervisor + "
-            f"{len(self._workers)} workers{Style.RESET_ALL}"
+            + f"{len(self._workers)} workers{Style.RESET_ALL}"
         )
         logger.info(
             "MultiAgentOrchestrator starting: supervisor + %d workers",
@@ -101,7 +103,7 @@ class MultiAgentOrchestrator:
 
         # Wait for all tasks (they run until stopped)
         try:
-            await asyncio.gather(*self._tasks, return_exceptions=False)
+            _ = await asyncio.gather(*self._tasks, return_exceptions=False)
         except asyncio.CancelledError:
             logger.info("MultiAgentOrchestrator cancelled")
         except Exception as exc:
@@ -129,7 +131,7 @@ class MultiAgentOrchestrator:
         for worker in self._workers.values():
             worker.stop()
         for task in self._tasks:
-            task.cancel()
+            _ = task.cancel()
 
     def pause(self) -> None:
         """Pause the supervisor (workers continue current task)."""

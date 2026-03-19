@@ -10,6 +10,7 @@ dependencies = [
   "langchain-openai>=0.3.0", # used against Ollama OpenAI-compat endpoint
   "langchain-ollama>=0.3.0", # kept for direct Ollama fallback
   "langchain-core>=0.3.0",
+  "langchain-mcp-adapters>=0.1.0", # LangChain ↔ MCP bridge
   # MCP + API
   "fastmcp>=2.0.0",
   "fastapi>=0.115.0",

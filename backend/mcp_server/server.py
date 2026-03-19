@@ -1,25 +1,25 @@
 """
-MCP Server — standardized tool interface between agents and the World Engine.
+MCP Server — standardized tool interface between the Command Agent and drones.
 
-This server exposes drone control functions as MCP tools, fulfilling the
-study case requirement that "all communication between the Agent (the LLM)
-and the Drones (the code) must be handled via the Model Context Protocol."
+ALL communication between the Agent (the LLM) and the Drones (the code) is
+handled via these MCP tools.  The agent calls tools through the MCP protocol
+(HTTP/SSE transport at /mcp) using langchain-mcp-adapters.
 
-The same tools are available:
-  1. As MCP tools at /mcp (for external MCP clients)
-  2. As LangChain @tool functions in the orchestrator (for in-process agent)
+Tool set:
+  Strategic (LLM decides):
+    - list_drones()                     → dynamic fleet discovery
+    - get_zones()                       → zone status and coverage
+    - assign_drone_to_zone(d, z)        → generates coverage plan, queues scans
+    - recall_drone(drone_id)            → return to base for charging
+    - get_mission_status()              → compact overview with survivor counts
 
-Both call the same WorldEngine methods, ensuring consistent behavior.
+  Primitive (called by orchestrator's mechanical tier via MCP):
+    - move_to(drone_id, x, y)           → move drone to cell
+    - thermal_scan(drone_id)            → scan at current position
+    - get_battery_status(drone_id)      → battery query
 
-Tool set (strategic level):
-  - list_drones()                    → dynamic fleet discovery
-  - get_zones()                      → zone status and coverage
-  - assign_drone_to_zone(d, z)       → coverage path + auto-scan
-  - recall_drone(drone_id)           → return to base for charging
-  - get_mission_status()             → compact overview
-  - get_battery_status(drone_id)     → battery query
-  - thermal_scan(drone_id)           → manual scan (fallback)
-  - move_to(drone_id, x, y)         → manual move (fallback)
+  Event polling:
+    - get_pending_events()              → drain events since last poll
 """
 
 from __future__ import annotations
@@ -31,17 +31,21 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from agent.coverage import generate_coverage_path, truncate_for_battery
+from agent.coverage import (
+    generate_coverage_plan,
+    truncate_plan_for_battery,
+)
 from agent.pathfinder import straight_line_path
 from world.engine import BATTERY_DRAIN_PER_MOVE, SCAN_RADIUS_CELLS, WorldEngine
 from world.models import WorldEvent, ZoneStatus
 
 mcp = FastMCP(name="sar-swarm")
 
-# Engine reference injected at startup
+# Engine reference — injected at startup
 _engine: WorldEngine | None = None
+
+# Per-MCP-consumer event queue (separate from the engine's per-consumer buffers)
 _event_queue: deque[dict[str, Any]] = deque(maxlen=500)
-_queue_lock = asyncio.Lock()
 
 
 def init_mcp(engine: WorldEngine) -> None:
@@ -55,14 +59,14 @@ def push_events(events: list[WorldEvent]) -> None:
         _event_queue.append(asdict(e))  # type: ignore[arg-type]
 
 
-# ── Strategic tools (primary) ────────────────────────────────────────────────
+# ── Strategic tools (LLM decides when to call) ──────────────────────────────
 
 
 @mcp.tool()
 def list_drones() -> dict[str, Any]:
     """
-    Dynamically discover active drones. Returns each drone's ID, battery %,
-    status, position, and current zone assignment.
+    Dynamically discover active drones on the network.
+    Returns each drone's ID, battery %, status, position, and zone assignment.
     Agent must call this first — drone IDs are never hard-coded.
     """
     assert _engine is not None, "Engine not initialised"
@@ -78,6 +82,7 @@ def list_drones() -> dict[str, Any]:
                 "pos": [d["col"], d["row"]],
                 "path_remaining": d["path_remaining"],
                 "assigned_zone": assignments.get(did),
+                "scan_points_remaining": _engine.peek_scan_queue(did),
             }
         )
     return {"ok": True, "drones": drones, "count": len(drones)}
@@ -108,9 +113,10 @@ def get_zones() -> dict[str, Any]:
 @mcp.tool()
 def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
     """
-    Assign a drone to systematically cover a zone. Generates an optimal
-    boustrophedon (lawn-mower) coverage path automatically and enables
-    auto-scanning. The drone will cover the zone without further commands.
+    Assign a drone to systematically cover a zone using a boustrophedon
+    (lawn-mower) pattern.  Generates an optimal coverage plan with scan
+    waypoints.  The drone moves to each scan point and thermal_scan() is
+    called at each one via MCP.
 
     Args:
         drone_id: ID of the drone to assign.
@@ -134,51 +140,78 @@ def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
     if zone.fully_covered:
         return {"ok": False, "error": f"Zone {zone_id} fully covered"}
 
-    coverage_path = generate_coverage_path(
-        _engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS
-    )
-    if not coverage_path:
+    # Generate coverage plan
+    plan = generate_coverage_plan(_engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS)
+    if plan.is_empty:
         return {"ok": False, "error": "No uncovered cells in zone"}
 
-    approach = straight_line_path(
-        drone_state["col"],
-        drone_state["row"],
-        coverage_path[0][0],
-        coverage_path[0][1],
-    )
-    full_path = approach + coverage_path
-
-    safe_path = truncate_for_battery(
-        full_path,
+    # Truncate plan for battery
+    drone_pos = (drone_state["col"], drone_state["row"])
+    safe_plan = truncate_plan_for_battery(
+        plan,
         drone_battery=drone_state["battery"],
+        drone_pos=drone_pos,
         base_pos=(_engine.base_col, _engine.base_row),
     )
-    if not safe_path:
+    if safe_plan.is_empty:
         return {
             "ok": False,
-            "error": f"Battery too low ({drone_state['battery']:.0f}%)",
+            "error": f"Battery too low ({drone_state['battery']:.0f}%). "
+            "Recall for charging first.",
         }
 
-    result = _engine.assign_coverage(drone_id, safe_path, zone_id)
-    if not result.get("ok"):
-        return result
+    # Build approach path from drone to first scan point
+    first_sp = safe_plan.scan_points[0]
+    approach = straight_line_path(
+        drone_state["col"], drone_state["row"], first_sp[0], first_sp[1]
+    )
 
-    cost = len(safe_path) * BATTERY_DRAIN_PER_MOVE
+    # Build scan queue: list of (segment, scan_point) pairs
+    # First entry: approach + first segment → first scan point
+    queue: list[tuple[list[tuple[int, int]], tuple[int, int]]] = []
+    for i, sp in enumerate(safe_plan.scan_points):
+        seg = safe_plan.segments[i] if i < len(safe_plan.segments) else []
+        if i == 0:
+            # Prepend approach to the first segment
+            seg = approach + seg
+        queue.append((seg, sp))
+
+    # Store zone assignment and scan queue
+    _engine.set_drone_zone(drone_id, zone_id)
+    _engine.set_scan_queue(drone_id, queue)
+
+    # Start the drone moving: pop first entry, assign its segment
+    first_entry = _engine.pop_scan_queue(drone_id)
+    if first_entry:
+        first_seg, first_scan_pt = first_entry
+        if first_seg:
+            _engine.assign_path(drone_id, first_seg)
+        # Re-insert just the scan point (segment consumed, scan still pending)
+        _engine._lock.acquire()
+        try:
+            q = _engine._drone_scan_queue.setdefault(drone_id, [])
+            q.insert(0, ([], first_scan_pt))
+        finally:
+            _engine._lock.release()
+
+    total_moves = safe_plan.total_moves + len(approach)
+    battery_cost = total_moves * BATTERY_DRAIN_PER_MOVE
     return {
         "ok": True,
         "drone_id": drone_id,
         "zone_id": zone_id,
-        "waypoints": result["waypoints"],
-        "battery_cost_pct": round(cost, 1),
-        "truncated": len(safe_path) < len(full_path),
+        "scan_points": len(safe_plan.scan_points),
+        "total_moves": total_moves,
+        "battery_cost_pct": round(battery_cost, 1),
+        "truncated": len(safe_plan.scan_points) < len(plan.scan_points),
     }
 
 
 @mcp.tool()
 def recall_drone(drone_id: str) -> dict[str, Any]:
     """
-    Recall a drone to base for charging. Clears current assignment
-    and generates a return path.
+    Recall a drone to base for charging.  Clears current zone assignment,
+    scan queue, and path.  Generates a return path.
 
     Args:
         drone_id: ID of the drone to recall.
@@ -190,13 +223,14 @@ def recall_drone(drone_id: str) -> dict[str, Any]:
 @mcp.tool()
 def get_mission_status() -> dict[str, Any]:
     """
-    Compact mission overview: zone coverages, drone statuses, and
-    whether all zones are 100% covered.
+    Compact mission overview: zone coverages, drone statuses, survivor
+    detection progress, and whether all zones are 100% covered.
     """
     assert _engine is not None
     zones_data = _engine.get_zones()
     state = _engine.get_world_state()
     assignments = _engine.get_drone_assignments()
+    found, total = _engine.get_survivor_counts()
 
     zone_summary = {}
     for zid, z in zones_data.items():
@@ -227,64 +261,25 @@ def get_mission_status() -> dict[str, Any]:
         "tick": state["tick"],
         "zones": zone_summary,
         "all_zones_covered": all_covered,
+        "survivors_found": found,
+        "survivors_total": total,
         "drones": drones,
     }
 
 
-# ── Fallback tools (manual control) ──────────────────────────────────────────
-
-
-@mcp.tool()
-def get_battery_status(drone_id: str) -> dict[str, Any]:
-    """
-    Return current battery level for a drone.
-
-    Args:
-        drone_id: ID of the drone to query.
-    """
-    assert _engine is not None
-    battery = _engine.get_battery(drone_id)
-    if battery is None:
-        return {"ok": False, "error": f"Unknown drone: {drone_id}"}
-    return {"ok": True, "drone_id": drone_id, "battery": round(battery, 2)}
-
-
-@mcp.tool()
-def thermal_scan(drone_id: str) -> dict[str, Any]:
-    """
-    Manually activate thermal sensor on drone. Detects survivors within
-    scan radius. Usually not needed — auto-scanning handles this during
-    coverage flights.
-
-    Args:
-        drone_id: ID of the scanning drone.
-    """
-    assert _engine is not None
-    events = _engine.thermal_scan(drone_id)
-    push_events(events)
-    found = [
-        asdict(e)  # type: ignore[arg-type]
-        for e in events
-        if getattr(e, "type", None) == "survivor_found"
-    ]
-    return {
-        "ok": True,
-        "drone_id": drone_id,
-        "survivors_found": len(found),
-        "events": found,
-    }
+# ── Primitive tools (called by orchestrator mechanical tier via MCP) ─────────
 
 
 @mcp.tool()
 def move_to(drone_id: str, x: int, y: int) -> dict[str, Any]:
     """
-    Manually move drone to cell (x, y). Generates a straight-line path.
-    Usually not needed — assign_drone_to_zone handles coverage automatically.
+    Move drone to cell (x, y).  Generates a straight-line path and queues it.
+    The world engine walks the path one cell per tick.
 
     Args:
         drone_id: ID of the drone to move.
-        x: Target column.
-        y: Target row.
+        x: Target column (cell address).
+        y: Target row (cell address).
     """
     assert _engine is not None
     state = _engine.get_world_state()
@@ -312,8 +307,63 @@ def move_to(drone_id: str, x: int, y: int) -> dict[str, Any]:
     }
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+@mcp.tool()
+def thermal_scan(drone_id: str) -> dict[str, Any]:
+    """
+    Activate thermal sensor on drone.  Detects survivors within scan radius
+    and marks zone cells as covered.  Must be called at each scan waypoint
+    for zone coverage to progress.
+
+    Args:
+        drone_id: ID of the scanning drone.
+    """
+    assert _engine is not None
+    events = _engine.thermal_scan(drone_id)
+    push_events(events)
+    found = [
+        asdict(e)  # type: ignore[arg-type]
+        for e in events
+        if getattr(e, "type", None) == "survivor_found"
+    ]
+    zone_covered = [
+        asdict(e)  # type: ignore[arg-type]
+        for e in events
+        if getattr(e, "type", None) == "zone_covered"
+    ]
+    return {
+        "ok": True,
+        "drone_id": drone_id,
+        "survivors_found": len(found),
+        "zones_completed": [e.get("zone_id") for e in zone_covered],
+        "events": found,
+    }
 
 
-def asdict_list(events: list[WorldEvent]) -> list[dict[str, Any]]:
-    return [asdict(e) for e in events]  # type: ignore[arg-type]
+@mcp.tool()
+def get_battery_status(drone_id: str) -> dict[str, Any]:
+    """
+    Return current battery level for a drone.
+
+    Args:
+        drone_id: ID of the drone to query.
+    """
+    assert _engine is not None
+    battery = _engine.get_battery(drone_id)
+    if battery is None:
+        return {"ok": False, "error": f"Unknown drone: {drone_id}"}
+    return {"ok": True, "drone_id": drone_id, "battery": round(battery, 2)}
+
+
+# ── Event polling ─────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def get_pending_events() -> dict[str, Any]:
+    """
+    Return and clear all world events queued since last poll.
+    The agent polls this to detect: drone_arrived, battery_low,
+    survivor_found, zone_covered, scan_started, drone_charging.
+    """
+    events = list(_event_queue)
+    _event_queue.clear()
+    return {"ok": True, "events": events, "count": len(events)}

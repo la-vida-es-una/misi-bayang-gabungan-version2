@@ -1,0 +1,16 @@
+📡 MISSION: Mission start: Scan zones for survivors.
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-19T03:35:03.033317+00:00"}
+[tick=0] 🧠 CoT: Mission: Scan zones for survivors.
+Base is at cell (49, 42).
+Begin by discovering the fleet and checking zone statuses.
+{"kind": "cot", "tick": 0, "thought": "Mission: Scan zones for survivors.\nBase is at cell (49, 42).\nBegin by discovering the fleet and checking zone statuses.", "ts": "2026-03-19T03:35:03.042013+00:00"}
+📡 MISSION: Executor error: Connection error.
+{"kind": "mission", "message": "Executor error: Connection error.", "ts": "2026-03-19T03:35:04.376479+00:00"}
+📡 MISSION: Mission start: Scan zones for survivors.
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-19T03:35:53.171465+00:00"}
+[tick=0] 🧠 CoT: Mission: Scan zones for survivors.
+Base is at cell (44, 57).
+Begin by discovering the fleet and checking zone statuses.
+{"kind": "cot", "tick": 0, "thought": "Mission: Scan zones for survivors.\nBase is at cell (44, 57).\nBegin by discovering the fleet and checking zone statuses.", "ts": "2026-03-19T03:35:53.172815+00:00"}
+📡 MISSION: Executor error: Connection error.
+{"kind": "mission", "message": "Executor error: Connection error.", "ts": "2026-03-19T03:35:54.593190+00:00"}

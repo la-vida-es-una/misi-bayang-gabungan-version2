@@ -11,18 +11,16 @@ Zone lifecycle is per-zone, not global:
 step() is a no-op unless phase == RUNNING.
 Drone return-to-base is AI-reasoned — engine does NOT auto-recall.
 
-Auto-scanning: When a drone is assigned to a zone via assign_coverage(),
-the engine automatically performs thermal scans as the drone moves,
-marking cells covered in the zone's mask. This eliminates the need for
-the LLM to call thermal_scan() hundreds of times.
+All drone commands (move_to, thermal_scan, etc.) are issued by the agent
+via MCP tool calls.  The engine never auto-scans — every thermal_scan must
+be an explicit MCP call so it appears in the mission log.
 """
 
 from __future__ import annotations
 
-import math
 import threading
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, final
 
 from world.grid import Grid
 from world.models import (
@@ -54,6 +52,7 @@ BATTERY_LOW_THRESHOLD = 25.0
 SCAN_RADIUS_CELLS = 5  # 11x11 detection pattern for faster coverage
 
 
+@final
 class WorldEngine:
     def __init__(self, grid: Grid, base_col: int, base_row: int) -> None:
         self.grid = grid
@@ -69,9 +68,16 @@ class WorldEngine:
         # Track which zones have already fired ZoneCoveredEvent
         self._zone_covered_fired: set[str] = set()
 
-        # Auto-scan: drone_id → zone_id. Drones in this dict get automatic
-        # thermal scans after every move during step().
-        self._auto_scan_drones: dict[str, str] = {}
+        # Zone assignment: drone_id → zone_id (which zone is the drone covering?)
+        self._drone_zone: dict[str, str] = {}
+
+        # Scan queue: drone_id → list of (segment, scan_point) pairs remaining.
+        # When a drone finishes a segment (DroneArrivedEvent), the orchestrator
+        # pops the next entry, calls thermal_scan via MCP, then assigns the
+        # next segment via move_to/assign_path.
+        self._drone_scan_queue: dict[
+            str, list[tuple[list[tuple[int, int]], tuple[int, int]]]
+        ] = {}
 
         # Per-consumer event buffers for drain_events()
         self._event_buffers: dict[str, list[WorldEvent]] = {}
@@ -257,12 +263,14 @@ class WorldEngine:
                 drone.col, drone.row, radius=SCAN_RADIUS_CELLS
             )
 
-            # Detect survivors
+            # Detect survivors (square pattern, same as coverage marking)
             for s in self._survivors.values():
                 if s.status == SurvivorStatus.FOUND:
                     continue
-                dist = math.hypot(drone.col - s.col, drone.row - s.row)
-                if dist <= SCAN_RADIUS_CELLS:
+                if (
+                    abs(drone.col - s.col) <= SCAN_RADIUS_CELLS
+                    and abs(drone.row - s.row) <= SCAN_RADIUS_CELLS
+                ):
                     s.status = SurvivorStatus.FOUND
                     events.append(
                         SurvivorFoundEvent(
@@ -292,46 +300,53 @@ class WorldEngine:
 
     # ── Coverage assignment & recall ──────────────────────────────────────────
 
-    def assign_coverage(
-        self, drone_id: str, waypoints: list[tuple[int, int]], zone_id: str
-    ) -> dict[str, Any]:
-        """
-        Assign a coverage path to a drone and enable auto-scanning for a zone.
+    def set_drone_zone(self, drone_id: str, zone_id: str | None) -> None:
+        """Track which zone a drone is currently assigned to."""
+        with self._lock:
+            if zone_id is None:
+                _ = self._drone_zone.pop(drone_id, None)
+            else:
+                self._drone_zone[drone_id] = zone_id
 
-        Clears any existing path/assignment first. The drone will move through
-        the waypoints one per tick, and the engine will automatically perform
-        thermal scans at each position.
+    def set_scan_queue(
+        self,
+        drone_id: str,
+        queue: list[tuple[list[tuple[int, int]], tuple[int, int]]],
+    ) -> None:
+        """Store a queue of (segment, scan_point) pairs for a drone.
+
+        The orchestrator pops entries one by one: assigns the segment as
+        a path, waits for DroneArrivedEvent, calls thermal_scan via MCP,
+        then pops the next entry.
         """
         with self._lock:
-            drone = self._drones.get(drone_id)
-            if drone is None:
-                return {"ok": False, "error": f"Unknown drone: {drone_id}"}
+            self._drone_scan_queue[drone_id] = list(queue)
 
-            # Clear existing path and assignment
-            drone.path = []
-            self._auto_scan_drones.pop(drone_id, None)
+    def pop_scan_queue(
+        self, drone_id: str
+    ) -> tuple[list[tuple[int, int]], tuple[int, int]] | None:
+        """Pop and return the next (segment, scan_point) from the queue."""
+        with self._lock:
+            q = self._drone_scan_queue.get(drone_id)
+            if q:
+                return q.pop(0)
+            return None
 
-            # Validate waypoints
-            valid: list[tuple[int, int]] = []
-            for c, r in waypoints:
-                if self.grid.in_bounds(c, r):
-                    valid.append((c, r))
+    def peek_scan_queue(self, drone_id: str) -> int:
+        """Return number of scan points remaining in queue."""
+        with self._lock:
+            return len(self._drone_scan_queue.get(drone_id, []))
 
-            if not valid:
-                return {"ok": False, "error": "No valid waypoints in path"}
-
-            drone.path = valid
-            drone.status = DroneStatus.MOVING
-
-            # Enable auto-scanning for this drone
-            self._auto_scan_drones[drone_id] = zone_id
-
-            return {"ok": True, "waypoints": len(valid)}
+    def clear_drone_assignment(self, drone_id: str) -> None:
+        """Clear zone assignment and scan queue for a drone."""
+        with self._lock:
+            _ = self._drone_zone.pop(drone_id, None)
+            _ = self._drone_scan_queue.pop(drone_id, None)
 
     def recall_drone(self, drone_id: str) -> dict[str, Any]:
         """
-        Send a drone back to base for charging. Clears current path and
-        auto-scan assignment, generates a return path via Bresenham line.
+        Send a drone back to base for charging.  Clears current path,
+        zone assignment, and scan queue.  Generates a return path.
         """
         from agent.pathfinder import straight_line_path
 
@@ -340,22 +355,19 @@ class WorldEngine:
             if drone is None:
                 return {"ok": False, "error": f"Unknown drone: {drone_id}"}
 
-            # Clear current assignment
+            # Clear everything
             drone.path = []
-            self._auto_scan_drones.pop(drone_id, None)
+            _ = self._drone_zone.pop(drone_id, None)
+            _ = self._drone_scan_queue.pop(drone_id, None)
 
-            # Already at base?
             if drone.col == self.base_col and drone.row == self.base_row:
                 drone.status = DroneStatus.IDLE
                 return {"ok": True, "at_base": True, "return_path": 0}
 
-            # Generate return path
             return_path = straight_line_path(
                 drone.col, drone.row, self.base_col, self.base_row
             )
-            # Filter for in-bounds cells
             valid = [(c, r) for c, r in return_path if self.grid.in_bounds(c, r)]
-            # Ensure base is the final destination
             if not valid or valid[-1] != (self.base_col, self.base_row):
                 valid.append((self.base_col, self.base_row))
 
@@ -372,53 +384,15 @@ class WorldEngine:
     def get_drone_assignments(self) -> dict[str, str | None]:
         """Return drone_id → zone_id mapping for all drones."""
         with self._lock:
-            return {did: self._auto_scan_drones.get(did) for did in self._drones}
+            return {did: self._drone_zone.get(did) for did in self._drones}
 
-    def _auto_scan(self, drone: Drone) -> list[WorldEvent]:
-        """
-        Perform automatic thermal scan at drone's current position.
-        Called during step() for drones with auto-scan enabled.
-        Marks cells as covered, detects survivors, checks zone completion.
-        Must be called while holding self._lock.
-        """
-        events: list[WorldEvent] = []
-
-        # Mark cells covered in all scanning zones
-        scan_results = self.grid.mark_scanned(
-            drone.col, drone.row, radius=SCAN_RADIUS_CELLS
-        )
-
-        # Detect survivors within scan radius
-        for s in self._survivors.values():
-            if s.status == SurvivorStatus.FOUND:
-                continue
-            dist = math.hypot(drone.col - s.col, drone.row - s.row)
-            if dist <= SCAN_RADIUS_CELLS:
-                s.status = SurvivorStatus.FOUND
-                events.append(
-                    SurvivorFoundEvent(
-                        drone_id=drone.id,
-                        survivor_id=s.id,
-                        col=s.col,
-                        row=s.row,
-                    )
-                )
-
-        # Check zone coverage completion
-        for zid, _newly in scan_results:
-            if zid not in self._zone_covered_fired:
-                zone = self.grid.get_zone(zid)
-                if zone and zone.fully_covered:
-                    self._zone_covered_fired.add(zid)
-                    zone.status = ZoneStatus.COMPLETED
-                    events.append(
-                        ZoneCoveredEvent(
-                            zone_id=zid,
-                            total_cells=zone.total_cells,
-                        )
-                    )
-
-        return events
+    def get_survivor_counts(self) -> tuple[int, int]:
+        """Return (found, total) survivor counts."""
+        with self._lock:
+            found = sum(
+                1 for s in self._survivors.values() if s.status == SurvivorStatus.FOUND
+            )
+            return found, len(self._survivors)
 
     # ── World tick ────────────────────────────────────────────────────────────
 
@@ -469,18 +443,11 @@ class WorldEngine:
                 )
             )
 
-            # Auto-scan: if drone is assigned to a zone, scan at every position
-            if drone.id in self._auto_scan_drones:
-                scan_events = self._auto_scan(drone)
-                events.extend(scan_events)
-
             if not drone.path:
                 drone.status = DroneStatus.IDLE
                 events.append(
                     DroneArrivedEvent(drone_id=drone.id, col=next_col, row=next_row)
                 )
-                # Clear auto-scan assignment when path completes
-                self._auto_scan_drones.pop(drone.id, None)
 
             if (
                 drone.battery <= BATTERY_LOW_THRESHOLD
@@ -533,12 +500,12 @@ class WorldEngine:
         with self._lock:
             return list(self._drones.keys())
 
-    def get_zones(self) -> dict[str, dict]:
+    def get_zones(self) -> dict[str, dict]:  # pyright: ignore[reportMissingTypeArgument]
         """Return all zones with their status and coverage."""
         with self._lock:
             return {zid: z.to_dict() for zid, z in self.grid.get_all_zones().items()}
 
-    def get_uncovered_cells(self, zone_id: str, max_cells: int = 10) -> list[dict]:
+    def get_uncovered_cells(self, zone_id: str, max_cells: int = 10) -> list[dict]:  # pyright: ignore[reportMissingTypeArgument]
         """Return sample of uncovered cells in a zone for LLM guidance."""
         import random
 
@@ -548,7 +515,7 @@ class WorldEngine:
                 cells = random.sample(list(cells), max_cells)
             return [{"col": c, "row": r} for c, r in cells]
 
-    def suggest_targets(self, zone_id: str, num_drones: int) -> list[dict]:
+    def suggest_targets(self, zone_id: str, num_drones: int) -> list[dict]:  # pyright: ignore[reportMissingTypeArgument]
         """Suggest well-spaced target positions for multiple drones."""
         with self._lock:
             cells = list(self.grid.uncovered_zone_cells(zone_id))

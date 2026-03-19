@@ -1,41 +1,49 @@
 """
-Command Agent Orchestrator — Strategic LLM for drone swarm coverage.
+Command Agent Orchestrator — MCP-mediated strategic drone swarm control.
 
-Architecture:
-  - The LLM makes STRATEGIC decisions: which drone → which zone, when to
-    recall for charging, how to react to events.
-  - An ALGORITHM (boustrophedon coverage path) handles spatial planning.
-  - Tools call WorldEngine DIRECTLY (in-process). The MCP server at /mcp
-    exposes the same tools for external access.
-  - CoT is captured via middleware and broadcast via SSE.
-  - The agent is event-driven: only invoked when something actionable happens
-    (drone arrived, battery low, zone covered, new zone added, drone charged).
+Architecture (two-tier, single agent):
+
+  STRATEGIC TIER (LLM reasoning):
+    The LLM makes strategic decisions: which drone → which zone, when to
+    recall for charging, how to react to zone completion / new zones.
+    Invoked only on high-level events (~15-25 calls per mission).
+
+  MECHANICAL TIER (deterministic, no LLM):
+    When a drone arrives at a scan waypoint (DroneArrivedEvent + scan queue
+    not empty), the orchestrator calls thermal_scan(drone_id) and then
+    move_to(drone_id, x, y) for the next segment — all via MCP.
+    This produces a rich mission log of primitive MCP tool calls without
+    burning LLM tokens on spatial decisions.
+
+MCP compliance:
+  ALL tool calls go through the MCP server at /mcp using
+  langchain-mcp-adapters.  The agent never calls WorldEngine directly.
+  This satisfies: "All communication between the Agent and the Drones
+  must be handled via the Model Context Protocol."
 
 Token efficiency:
-  - System prompt: ~200 tokens (strategic, not spatial).
-  - Tool results: concise JSON (~100 tokens each).
-  - History: sliding window of last 10 messages.
-  - Agent invoked only on events, not every tick.
-  - Total per mission: ~15-25 invocations, well within 24k context.
+  System prompt: ~250 tokens.  Tool results: ~100 tokens each.
+  History: sliding window of last 10 messages.
+  Mechanical tier uses MCP but not LLM context.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import threading
 import traceback
 from dataclasses import asdict
-from typing import Any
+from typing import Any, final
 
-from colorama import Fore, Style, init as colorama_init
+from colorama import Fore, Style
+from colorama import init as colorama_init
 from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_core.tools import tool
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
@@ -46,23 +54,16 @@ from agent.cot_logger import (
     log_tool_call,
     log_tool_result,
 )
-from agent.coverage import generate_coverage_path, truncate_for_battery
-from agent.pathfinder import straight_line_path
-from world.engine import (
-    BATTERY_DRAIN_PER_MOVE,
-    SCAN_RADIUS_CELLS,
-    WorldEngine,
-)
+from world.engine import WorldEngine
 from world.models import (
     AgentErrorEvent,
     AgentThinkingEvent,
     AgentToolCallEvent,
     AgentToolResultEvent,
     WorldEvent,
-    ZoneStatus,
 )
 
-load_dotenv()
+_ = load_dotenv()
 colorama_init(autoreset=True)
 
 logger = logging.getLogger("sar.agent")
@@ -71,32 +72,46 @@ logger = logging.getLogger("sar.agent")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 AGENT_TICK_SEC = float(os.getenv("AGENT_TICK_INTERVAL", "2.0"))
-AGENT_CONSUMER = "agent"  # event buffer consumer name
+MCP_BASE_URL = os.getenv("MCP_BASE_URL", "http://localhost:8000/mcp/mcp")
+AGENT_CONSUMER = "agent"
 
 SYSTEM_PROMPT = """\
-You are the SAR Swarm Command Agent. Your mission: achieve 100% search \
-coverage of all designated zones using autonomous rescue drones.
+You are the SAR Swarm Command Agent for a search-and-rescue mission.
+Your goal: locate survivors in disaster zones by achieving 100% thermal \
+scan coverage of all designated search zones using autonomous rescue drones.
 
-AVAILABLE TOOLS:
+AVAILABLE MCP TOOLS:
 - list_drones(): Discover drones (IDs, battery, status, zone assignment).
 - get_zones(): List zones with coverage percentages and status.
 - assign_drone_to_zone(drone_id, zone_id): Assign a drone to systematically \
-cover a zone. Generates an optimal lawn-mower path automatically.
+cover a zone.  Generates an optimal lawn-mower path with scan waypoints.  \
+The drone will move to each waypoint and thermal_scan() is called at each one.
 - recall_drone(drone_id): Send a drone back to base for charging.
-- get_mission_status(): Compact mission overview.
+- get_mission_status(): Overview with zone coverage and survivors found.
 
 RULES:
-1. ALWAYS call list_drones() and get_zones() first to understand the situation.
-2. If NO zones exist, respond "Waiting for zones" and STOP. Do NOT fly without zones.
+1. ALWAYS call list_drones() and get_zones() first to discover the fleet.
+2. If NO zones exist, respond "Waiting for search zones" and STOP.
 3. Assign each idle drone to an uncovered zone using assign_drone_to_zone().
 4. When battery_low is reported (<25%), IMMEDIATELY recall that drone.
-5. When a drone finishes charging (battery=100%), reassign it to an uncovered zone.
-6. When a zone reaches 100% coverage, reassign its drones to remaining zones.
-7. Mission is COMPLETE when all zones reach 100%.
+5. When a drone finishes charging (battery=100%), reassign it to a zone.
+6. When a zone reaches 100%, reassign its drones to remaining zones.
+7. Mission is COMPLETE when all zones reach 100% and survivors are found.
 
-THINK STEP BY STEP. Explain your reasoning briefly before each tool call.
-Example: "Drone_1 battery is low at 20%, recalling to base for charging."
+THINK STEP BY STEP before each action.  Explain your reasoning briefly.
+Example: "Drone_1 has 20% battery, so I am recalling it to base while \
+sending Drone_2 to the farther zone since it has 85% battery."
 """
+
+# Strategic tools the LLM may call.  Mechanical tools (thermal_scan, move_to)
+# are loaded from MCP too, but only used by the mechanical tier.
+STRATEGIC_TOOL_NAMES = {
+    "list_drones",
+    "get_zones",
+    "assign_drone_to_zone",
+    "recall_drone",
+    "get_mission_status",
+}
 
 
 # ── SSE broadcast helper ─────────────────────────────────────────────────────
@@ -105,7 +120,6 @@ _broadcast_error_logged = False
 
 
 def _broadcast_agent_event(event: Any) -> None:
-    """Broadcast agent events via SSE. Import here to avoid circular imports."""
     global _broadcast_error_logged
     try:
         from mission.receiver import broadcast_event
@@ -121,6 +135,7 @@ def _broadcast_agent_event(event: Any) -> None:
 # ── CoT Middleware ────────────────────────────────────────────────────────────
 
 
+@final
 class CoTMiddleware(AgentMiddleware):
     """Captures chain-of-thought and tool calls, broadcasts via SSE."""
 
@@ -157,212 +172,10 @@ class CoTMiddleware(AgentMiddleware):
             _broadcast_agent_event(AgentToolCallEvent(tick=tick, tool=name, args=args))
 
 
-# ── Strategic tool builder ────────────────────────────────────────────────────
-
-
-def _build_tools(engine: WorldEngine) -> list:
-    """Build LangChain @tool functions for strategic drone swarm control.
-
-    These tools operate at the STRATEGIC level — the LLM decides which drone
-    goes to which zone, when to recall, etc. Spatial path planning is handled
-    algorithmically by the coverage module.
-    """
-
-    @tool
-    def list_drones() -> str:
-        """Discover all active drones. Returns ID, battery %, status, position,
-        and current zone assignment for each drone. Always call this first."""
-        state = engine.get_world_state()
-        assignments = engine.get_drone_assignments()
-        drones = []
-        for did, d in state["drones"].items():
-            drones.append(
-                {
-                    "id": did,
-                    "battery": round(d["battery"], 1),
-                    "status": d["status"],
-                    "pos": [d["col"], d["row"]],
-                    "path_remaining": d["path_remaining"],
-                    "assigned_zone": assignments.get(did),
-                }
-            )
-        return json.dumps({"drones": drones, "count": len(drones)})
-
-    @tool
-    def get_zones() -> str:
-        """Get all search zones with coverage status. Returns zone ID, label,
-        status (idle/scanning/completed), and coverage percentage."""
-        zones_data = engine.get_zones()
-        zones = []
-        for zid, z in zones_data.items():
-            zones.append(
-                {
-                    "id": zid,
-                    "label": z.get("label", ""),
-                    "status": z.get("status", ""),
-                    "coverage": f"{z.get('coverage_ratio', 0) * 100:.0f}%",
-                    "total_cells": z.get("total_cells", 0),
-                }
-            )
-        return json.dumps({"zones": zones, "count": len(zones)})
-
-    @tool
-    def assign_drone_to_zone(drone_id: str, zone_id: str) -> str:
-        """Assign a drone to systematically cover a search zone. Automatically
-        generates an optimal boustrophedon (lawn-mower) coverage path and
-        enables auto-scanning. The drone will cover the zone without further
-        commands needed.
-
-        Args:
-            drone_id: ID of the drone to assign (e.g. 'drone_1').
-            zone_id: ID of the zone to cover.
-        """
-        # Validate drone
-        state = engine.get_world_state()
-        drone_state = state["drones"].get(drone_id)
-        if drone_state is None:
-            return json.dumps({"ok": False, "error": f"Unknown drone: {drone_id}"})
-
-        # Validate zone
-        zone = engine.grid.get_zone(zone_id)
-        if zone is None:
-            return json.dumps({"ok": False, "error": f"Unknown zone: {zone_id}"})
-
-        # Ensure zone is in scanning state
-        if zone.status == ZoneStatus.IDLE:
-            engine.start_scan([zone_id])
-        elif zone.status == ZoneStatus.COMPLETED:
-            return json.dumps(
-                {"ok": False, "error": f"Zone {zone_id} already 100% covered"}
-            )
-
-        # Check if zone has uncovered cells
-        if zone.fully_covered:
-            return json.dumps(
-                {"ok": False, "error": f"Zone {zone_id} already fully covered"}
-            )
-
-        # Generate coverage path for remaining uncovered cells
-        coverage_path = generate_coverage_path(
-            engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS
-        )
-        if not coverage_path:
-            return json.dumps({"ok": False, "error": "No uncovered cells in zone"})
-
-        # Generate approach path from drone's current position
-        approach = straight_line_path(
-            drone_state["col"],
-            drone_state["row"],
-            coverage_path[0][0],
-            coverage_path[0][1],
-        )
-
-        # Combine approach + coverage
-        full_path = approach + coverage_path
-
-        # Truncate for battery safety
-        safe_path = truncate_for_battery(
-            full_path,
-            drone_battery=drone_state["battery"],
-            base_pos=(engine.base_col, engine.base_row),
-        )
-
-        if not safe_path:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error": f"Battery too low ({drone_state['battery']:.0f}%). "
-                    "Recall for charging first.",
-                }
-            )
-
-        # Check if we have enough path to actually do coverage (not just approach)
-        if len(safe_path) <= len(approach) and len(approach) > 0:
-            return json.dumps(
-                {
-                    "ok": False,
-                    "error": f"Battery ({drone_state['battery']:.0f}%) only enough "
-                    "for approach, not coverage. Recall for charging first.",
-                }
-            )
-
-        # Assign to engine
-        result = engine.assign_coverage(drone_id, safe_path, zone_id)
-        if not result.get("ok"):
-            return json.dumps(result)
-
-        battery_cost = len(safe_path) * BATTERY_DRAIN_PER_MOVE
-        return json.dumps(
-            {
-                "ok": True,
-                "drone_id": drone_id,
-                "zone_id": zone_id,
-                "waypoints": result["waypoints"],
-                "battery_cost": f"{battery_cost:.0f}%",
-                "truncated": len(safe_path) < len(full_path),
-            }
-        )
-
-    @tool
-    def recall_drone(drone_id: str) -> str:
-        """Recall a drone to base for charging. Clears its current zone
-        assignment and generates a return path.
-
-        Args:
-            drone_id: ID of the drone to recall (e.g. 'drone_1').
-        """
-        result = engine.recall_drone(drone_id)
-        return json.dumps(result)
-
-    @tool
-    def get_mission_status() -> str:
-        """Get a compact mission overview: zone coverages, drone statuses,
-        and whether all zones are covered."""
-        zones_data = engine.get_zones()
-        state = engine.get_world_state()
-
-        zone_summary = {}
-        for zid, z in zones_data.items():
-            zone_summary[zid] = {
-                "coverage": f"{z.get('coverage_ratio', 0) * 100:.0f}%",
-                "status": z.get("status", ""),
-            }
-
-        all_covered = (
-            all(z.get("coverage_ratio", 0) >= 1.0 for z in zones_data.values())
-            if zones_data
-            else False
-        )
-
-        drone_lines = []
-        assignments = engine.get_drone_assignments()
-        for did, d in state["drones"].items():
-            zone = assignments.get(did, "none")
-            drone_lines.append(
-                f"{did}: bat={d['battery']:.0f}% {d['status']} zone={zone}"
-            )
-
-        return json.dumps(
-            {
-                "tick": state["tick"],
-                "zones": zone_summary,
-                "all_zones_covered": all_covered,
-                "drones": drone_lines,
-            }
-        )
-
-    return [
-        list_drones,
-        get_zones,
-        assign_drone_to_zone,
-        recall_drone,
-        get_mission_status,
-    ]
-
-
 # ── Command Agent ─────────────────────────────────────────────────────────────
 
 
+@final
 class CommandAgent:
     def __init__(
         self,
@@ -382,32 +195,17 @@ class CommandAgent:
         self._paused = False
         self._pause_lock = threading.Lock()
 
-        # Queue for user-injected messages (thread-safe)
         self._user_messages: list[str] = []
         self._user_msg_lock = threading.Lock()
-
-        # Deduplication: don't fire "drone charged" multiple times
         self._charged_notified: set[str] = set()
 
-        # Register as event consumer on the engine
+        # MCP client + tools loaded during run() (async context needed)
+        self._mcp_client: MultiServerMCPClient | None = None
+        self._all_tools: list = []  # pyright: ignore[reportMissingTypeArgument]
+        self._strategic_tools: list = []  # pyright: ignore[reportMissingTypeArgument]
+        self._tool_map: dict[str, Any] = {}
+
         self.engine.register_event_consumer(AGENT_CONSUMER)
-
-        # Build tools bound to this engine
-        tools = _build_tools(engine)
-
-        llm = ChatOpenAI(
-            base_url=OLLAMA_BASE_URL,
-            api_key=SecretStr("ollama"),
-            model=OLLAMA_MODEL,
-            temperature=0,
-        )
-
-        self._agent = create_agent(
-            llm,
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT,
-            middleware=[CoTMiddleware(self._tick_ref)],
-        )
 
     # ── Public control ────────────────────────────────────────────────────────
 
@@ -416,21 +214,49 @@ class CommandAgent:
         log_mission(f"Mission start: {self.mission}")
         print(f"{Fore.MAGENTA}Mission: {self.mission}{Style.RESET_ALL}")
 
+        # Connect to MCP server and load tools (v0.1.0+ API — no context manager)
+        self._mcp_client = MultiServerMCPClient(
+            {
+                "sar-swarm": {
+                    "transport": "streamable_http",
+                    "url": MCP_BASE_URL,
+                },
+            }
+        )
+
+        self._all_tools = await self._mcp_client.get_tools()
+        self._tool_map = {t.name: t for t in self._all_tools}
+        self._strategic_tools = [
+            t for t in self._all_tools if t.name in STRATEGIC_TOOL_NAMES
+        ]
+        logger.info(
+            "MCP tools loaded: %s",
+            [t.name for t in self._all_tools],
+        )
+
+        # Build the LLM agent with ONLY strategic tools
+        llm = ChatOpenAI(
+            base_url=OLLAMA_BASE_URL,
+            api_key=SecretStr("ollama"),
+            model=OLLAMA_MODEL,
+            temperature=0,
+        )
+        self._agent = create_agent(
+            llm,
+            tools=self._strategic_tools,
+            system_prompt=SYSTEM_PROMPT,
+            middleware=[CoTMiddleware(self._tick_ref)],
+        )
+
         # Initial invocation
-        try:
-            await self._invoke(
-                f"Mission: {self.mission}\n"
-                f"Base at cell ({self.base_col}, {self.base_row}).\n"
-                "Discover the fleet and zones, then assign drones to coverage."
-            )
-        except Exception as exc:
-            self._running = False
-            logger.error("Initial agent invoke failed: %s", exc)
-            raise
+        await self._invoke(
+            f"Mission: {self.mission}\n"
+            f"Base at cell ({self.base_col}, {self.base_row}).\n"
+            "Discover the fleet and zones, then assign drones to coverage."
+        )
 
         while self._running:
             await asyncio.sleep(AGENT_TICK_SEC)
-
             if self._paused:
                 user_msgs = self._drain_user_messages()
                 if user_msgs:
@@ -438,7 +264,6 @@ class CommandAgent:
                     for msg in user_msgs:
                         await self._invoke(f"[User message] {msg}")
                 continue
-
             try:
                 await self._agent_tick()
             except Exception as exc:
@@ -470,22 +295,111 @@ class CommandAgent:
     def is_paused(self) -> bool:
         return self._paused
 
+    # ── Mechanical tier: scan-on-arrival via MCP ──────────────────────────────
+
+    async def _mechanical_scan_and_advance(self, drone_id: str) -> None:
+        """Called when a drone arrives at a scan waypoint.
+
+        1. Pop the pending scan entry from queue
+        2. Call thermal_scan(drone_id) via MCP
+        3. Pop next entry from queue
+        4. Call move_to(drone_id, x, y) via MCP for the next scan point
+        """
+        tick = self._tick_ref[0]
+
+        # Pop the pending scan (empty segment + scan point)
+        entry = self.engine.pop_scan_queue(drone_id)
+        if entry is None:
+            return
+
+        _seg, scan_point = entry
+
+        # Call thermal_scan via MCP
+        scan_tool = self._tool_map.get("thermal_scan")
+        if scan_tool:
+            try:
+                result = await scan_tool.ainvoke({"drone_id": drone_id})
+                log_tool_call(tick, "thermal_scan", {"drone_id": drone_id})
+                log_tool_result(tick, "thermal_scan", {"result": str(result)[:200]})
+                _broadcast_agent_event(
+                    AgentToolCallEvent(
+                        tick=tick, tool="thermal_scan", args={"drone_id": drone_id}
+                    )
+                )
+                _broadcast_agent_event(
+                    AgentToolResultEvent(
+                        tick=tick,
+                        tool="thermal_scan",
+                        result={"drone_id": drone_id, "at": list(scan_point)},
+                    )
+                )
+                print(
+                    f"{Fore.GREEN}[tick={tick}] mechanical: thermal_scan({drone_id}) at {scan_point}{Style.RESET_ALL}"
+                )
+            except Exception as exc:
+                logger.error("Mechanical thermal_scan failed for %s: %s", drone_id, exc)
+
+        # Pop next entry and start moving to next scan point
+        next_entry = self.engine.pop_scan_queue(drone_id)
+        if next_entry is None:
+            # All scan points done — clear assignment
+            self.engine.clear_drone_assignment(drone_id)
+            return
+
+        next_seg, next_sp = next_entry
+        # Move to the next scan point
+        move_tool = self._tool_map.get("move_to")
+        if move_tool and next_sp:
+            try:
+                result = await move_tool.ainvoke(
+                    {"drone_id": drone_id, "x": next_sp[0], "y": next_sp[1]}
+                )
+                log_tool_call(
+                    tick,
+                    "move_to",
+                    {"drone_id": drone_id, "x": next_sp[0], "y": next_sp[1]},
+                )
+                _broadcast_agent_event(
+                    AgentToolCallEvent(
+                        tick=tick,
+                        tool="move_to",
+                        args={"drone_id": drone_id, "x": next_sp[0], "y": next_sp[1]},
+                    )
+                )
+                print(
+                    f"{Fore.GREEN}[tick={tick}] mechanical: move_to({drone_id}, {next_sp[0]}, {next_sp[1]}){Style.RESET_ALL}"
+                )
+            except Exception as exc:
+                logger.error("Mechanical move_to failed for %s: %s", drone_id, exc)
+
+        # Re-push the scan point (move started, scan pending on arrival)
+        _ = self.engine._lock.acquire()
+        try:
+            q = self.engine._drone_scan_queue.setdefault(drone_id, [])
+            q.insert(0, ([], next_sp))
+        finally:
+            self.engine._lock.release()
+
     # ── Event-driven agent tick ───────────────────────────────────────────────
 
     async def _agent_tick(self) -> None:
-        """Process world events and invoke LLM only when action is needed."""
         self._tick_ref[0] += 1
         tick = self._tick_ref[0]
 
-        # Drain events from engine
         raw_events: list[WorldEvent] = self.engine.drain_events(AGENT_CONSUMER)
         events: list[dict[str, Any]] = [asdict(e) for e in raw_events]  # type: ignore[arg-type]
 
-        # Log all events
         for ev in events:
             log_event(tick, ev)
 
-        # Build actionable triggers from events
+        # MECHANICAL TIER: handle scan-on-arrival for drones with pending scans
+        for ev in events:
+            if ev.get("type") == "drone_arrived":
+                did = ev.get("drone_id", "")
+                if self.engine.peek_scan_queue(did) > 0:
+                    await self._mechanical_scan_and_advance(did)
+
+        # STRATEGIC TIER: build LLM triggers from remaining events
         triggers: list[str] = []
 
         for ev in events:
@@ -493,18 +407,20 @@ class CommandAgent:
 
             if etype == "drone_arrived":
                 did = ev.get("drone_id", "?")
-                triggers.append(
-                    f"Drone {did} finished its path at ({ev.get('col')},{ev.get('row')}) "
-                    "and is now idle. Check zone coverage and reassign if needed."
-                )
-                self._charged_notified.discard(did)
+                # Only trigger LLM if scan queue empty (coverage done)
+                if self.engine.peek_scan_queue(did) == 0:
+                    triggers.append(
+                        f"Drone {did} finished coverage at ({ev.get('col')},{ev.get('row')}) "
+                        + "and is now idle.  Check zone coverage and reassign if needed."
+                    )
+                    self._charged_notified.discard(did)
 
             elif etype == "battery_low":
                 did = ev.get("drone_id", "?")
                 bat = ev.get("battery", 0)
                 triggers.append(
                     f"URGENT: Drone {did} battery LOW at {bat:.0f}%. "
-                    "Recall to base IMMEDIATELY with recall_drone()."
+                    + "Recall to base IMMEDIATELY with recall_drone()."
                 )
 
             elif etype == "zone_covered":
@@ -517,14 +433,12 @@ class CommandAgent:
             elif etype == "zone_added":
                 zid = ev.get("zone_id", "?")
                 label = ev.get("label", "")
-                triggers.append(
-                    f"New zone added: {zid} ({label}). Assign idle drones to cover it."
-                )
+                triggers.append(f"New zone added: {zid} ({label}). Assign idle drones.")
 
             elif etype == "survivor_found":
                 sid = ev.get("survivor_id", "?")
                 did = ev.get("drone_id", "?")
-                triggers.append(f"Survivor {sid} found by {did}!")
+                triggers.append(f"SURVIVOR {sid} found by {did}!")
 
             elif etype == "drone_charging":
                 did = ev.get("drone_id", "?")
@@ -535,12 +449,10 @@ class CommandAgent:
                         f"Drone {did} fully charged (100%). Ready for assignment."
                     )
 
-        # Check for user-injected messages
         user_msgs = self._drain_user_messages()
         for msg in user_msgs:
             triggers.append(f"[User message] {msg}")
 
-        # Only invoke LLM when there are actionable triggers
         if not triggers:
             return
 
@@ -553,7 +465,7 @@ class CommandAgent:
             self._user_messages.clear()
             return msgs
 
-    # ── Agent invocation ──────────────────────────────────────────────────────
+    # ── Agent invocation (LLM via MCP tools) ──────────────────────────────────
 
     async def _invoke(self, user_message: str) -> None:
         loop = asyncio.get_running_loop()
@@ -580,7 +492,6 @@ class CommandAgent:
             )
             return
 
-        # Process result messages
         out_messages: list[Any] = result.get("messages", [])
         tick = self._tick_ref[0]
 
@@ -599,7 +510,6 @@ class CommandAgent:
             if content and not tool_calls and isinstance(msg, AIMessage):
                 logger.debug("[tick=%d] AI: %s", tick, content[:200])
 
-        # Update history — sliding window for context management
         self._history.append(HumanMessage(content=user_message))
         if out_messages:
             last = out_messages[-1]

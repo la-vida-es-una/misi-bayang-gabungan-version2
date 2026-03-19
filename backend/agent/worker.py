@@ -15,11 +15,12 @@ import json
 import os
 import traceback
 from dataclasses import asdict
+from typing import final
 
 from colorama import Fore, Style
-from langchain.agents import create_agent
+from langchain.agents import create_agent  # pyright: ignore[reportUnknownVariableType]
 from langchain_core.messages import HumanMessage
-from langchain_core.tools import tool
+from langchain_core.tools import tool  # pyright: ignore[reportUnknownVariableType]
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
@@ -51,6 +52,7 @@ IMPORTANT:
 """
 
 
+@final
 class DroneWorkerAgent:
     """Worker agent that controls a single drone."""
 
@@ -87,7 +89,7 @@ class DroneWorkerAgent:
             system_prompt=WORKER_SYSTEM_PROMPT.format(drone_id=drone_id),
         )
 
-    def _build_tools(self) -> list:
+    def _build_tools(self) -> list:  # pyright: ignore[reportMissingTypeArgument]
         """Build tools scoped to this drone only."""
         engine = self.engine
         drone_id = self.drone_id
