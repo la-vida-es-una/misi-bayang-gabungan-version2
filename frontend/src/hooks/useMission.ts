@@ -74,6 +74,7 @@ export function useMission() {
     addChatMessage,
     dispatchAgentStopped,
     dispatchAgentResumed,
+    addPendingZone,
   } = useMissionContext();
 
   const { getMapBounds, getMap } = useMapRef();
@@ -114,7 +115,7 @@ export function useMission() {
     setError(null);
 
     const droneCount = opts.droneCount ?? 3;
-    const cellSizeM = opts.cellSizeM ?? 1.0;
+    const cellSizeM = opts.cellSizeM ?? 0;  // 0 = auto-calculated by backend
     const missionText = opts.missionText ?? "Scan zones for survivors.";
     const droneIds = Array.from({ length: droneCount }, (_, i) => `drone_${i + 1}`);
 
@@ -156,7 +157,23 @@ export function useMission() {
       return false;
     }
 
-    // Step 2: start
+    // Step 2: register any zones that were drawn before mission start
+    for (const pending of state.pendingZones) {
+      const zBody = { geojson_polygon: toGeoJSON(pending.points), label: null };
+      const zResult = await post<ZoneAddResponse>("/mission/zone/add", zBody);
+      if (zResult.ok) {
+        const zoneClient: ZoneClientState = {
+          ...zResult.data.zone,
+          polygon: pending.points,
+          color: pending.color,
+          selected: false,
+        };
+        dispatchZoneAdded(zoneClient);
+      }
+      // silently skip failed zones — mission continues regardless
+    }
+
+    // Step 3: start
     const body: StartMissionRequest = { mission_text: missionText };
     const result = await post<StartMissionResponse>("/mission/start", body);
     setLoading(false);
@@ -168,11 +185,20 @@ export function useMission() {
 
     dispatchMissionStarted();
     return true;
-  }, [state.simulationMode, state.simConfig, getMapBounds, getMap, dispatchMissionStarted, dispatchMapDefined]);
+  }, [state.simulationMode, state.simConfig, state.pendingZones, getMapBounds, getMap, dispatchMissionStarted, dispatchMapDefined, dispatchZoneAdded]);
 
   // ── addZone ───────────────────────────────────────────────────────────────
 
   const addZone = useCallback(async (zonePoly: LatLonTuple[], label?: string) => {
+    const color = getNextZoneColor(state);
+
+    // If mission hasn't started yet, store locally — will be registered after define_map
+    if (state.phase === "pending_zone") {
+      addPendingZone(zonePoly, color);
+      return `pending_${state.pendingZones.length}`;
+    }
+
+    // Mission is running — register with backend immediately
     setLoading(true);
     setError(null);
     const body = { geojson_polygon: toGeoJSON(zonePoly), label: label ?? null };
@@ -183,12 +209,12 @@ export function useMission() {
     const zoneClient: ZoneClientState = {
       ...result.data.zone,
       polygon: zonePoly,
-      color: getNextZoneColor(state),
+      color,
       selected: false,
     };
     dispatchZoneAdded(zoneClient);
     return result.data.zone_id;
-  }, [state, dispatchZoneAdded]);
+  }, [state, dispatchZoneAdded, addPendingZone]);
 
   // ── removeZone ────────────────────────────────────────────────────────────
 
@@ -233,6 +259,15 @@ export function useMission() {
     return true;
   }, [dispatchAgentResumed]);
 
+  // ── restartAgent ──────────────────────────────────────────────────────────
+
+  const restartAgent = useCallback(async () => {
+    const result = await post<{ ok: boolean }>("/mission/agent/restart", {});
+    if (!result.ok) { setError(result.error); return false; }
+    dispatchAgentResumed();
+    return true;
+  }, [dispatchAgentResumed]);
+
   // ── promptAgent ───────────────────────────────────────────────────────────
 
   const promptAgent = useCallback(async (message: string) => {
@@ -264,7 +299,7 @@ export function useMission() {
     loading, error,
     startMission, addZone, removeZone,
     scanZones, stopScanning,
-    stopAgent, resumeAgent, promptAgent,
+    stopAgent, resumeAgent, restartAgent, promptAgent,
     endMission,
   };
 }

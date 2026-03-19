@@ -191,6 +191,13 @@ export interface AgentUserMessageEvent {
   content: string;
 }
 
+export interface AgentErrorEvent {
+  type: "agent_error";
+  tick: number;
+  error: string;
+  detail: string;
+}
+
 export type WorldEvent =
   | DroneMovedEvent
   | DroneArrivedEvent
@@ -210,7 +217,8 @@ export type WorldEvent =
   | AgentToolResultEvent
   | AgentStoppedEvent
   | AgentResumedEvent
-  | AgentUserMessageEvent;
+  | AgentUserMessageEvent
+  | AgentErrorEvent;
 
 // ── Chat messages ─────────────────────────────────────────────────────────────
 
@@ -220,7 +228,8 @@ export type ChatMessageRole =
   | "assistant_thinking"
   | "tool_call"
   | "tool_result"
-  | "assistant";
+  | "assistant"
+  | "error";
 
 export interface ChatMessage {
   id: string;

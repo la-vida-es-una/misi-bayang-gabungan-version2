@@ -1,11 +1,9 @@
 /**
  * DrawZonePanel -- pre-start setup panel.
  *
- * In the new flow, this panel lets the user:
- *   1. Draw zones on the map (optional before start)
- *   2. Launch the mission (starts world ticks + agent)
- *
- * Zones can also be added after the mission starts.
+ * Zones drawn here are stored locally (pendingZones) until the user
+ * hits START MISSION. They are registered with the backend during the
+ * startMission flow (after define_map succeeds), not before.
  */
 
 import React from "react";
@@ -39,13 +37,13 @@ const infoRow: React.CSSProperties = {
 };
 
 export function DrawZonePanel() {
-  const { state } = useMissionContext();
+  const { state, removePendingZone } = useMissionContext();
   const { startMission, addZone, loading, error } = useMission();
 
-  const zoneCount = Object.keys(state.zones).length;
+  const pendingCount = state.pendingZones.length;
   const drawingPoints = state.drawingZonePoly.length;
 
-  // Commit the drawn zone to the backend
+  // Commit drawn zone — stored locally, sent to backend only after mission starts
   const handleCommitZone = async () => {
     if (drawingPoints < 3) return;
     await addZone(state.drawingZonePoly);
@@ -66,8 +64,10 @@ export function DrawZonePanel() {
           </span>
         </div>
         <div style={infoRow}>
-          <span style={{ color: "var(--text-secondary)", fontSize: "0.78rem" }}>Zones registered</span>
-          <span>{zoneCount}</span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.78rem" }}>Zones ready</span>
+          <span style={{ color: pendingCount > 0 ? "var(--success-color)" : "var(--text-secondary)" }}>
+            {pendingCount}
+          </span>
         </div>
 
         {drawingPoints >= 3 && (
@@ -82,17 +82,33 @@ export function DrawZonePanel() {
         )}
       </div>
 
-      {/* Zone list */}
-      {zoneCount > 0 && (
+      {/* Pending zone list */}
+      {pendingCount > 0 && (
         <div className="glass" style={{ padding: 10, marginBottom: 14 }}>
-          <span style={label}>Zones</span>
-          {Object.values(state.zones).map((z) => (
-            <div key={z.zone_id} style={{ ...infoRow, alignItems: "center" }}>
+          <span style={label}>Zones (will register on start)</span>
+          {state.pendingZones.map((z, i) => (
+            <div key={i} style={{ ...infoRow, alignItems: "center" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <div style={{ width: 8, height: 8, borderRadius: "50%", background: z.color }} />
-                <span style={{ fontSize: "0.78rem" }}>{z.label}</span>
+                <span style={{ fontSize: "0.78rem" }}>Zone {String.fromCharCode(65 + i)}</span>
+                <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>
+                  ({z.points.length} pts)
+                </span>
               </div>
-              <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>{z.status}</span>
+              <button
+                onClick={() => removePendingZone(i)}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--danger-color)",
+                  cursor: "pointer",
+                  fontSize: "0.75rem",
+                  padding: "0 4px",
+                }}
+                title="Remove zone"
+              >
+                ✕
+              </button>
             </div>
           ))}
         </div>

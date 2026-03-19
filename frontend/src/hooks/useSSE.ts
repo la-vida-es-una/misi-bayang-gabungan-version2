@@ -160,6 +160,18 @@ export function useSSE(active: boolean) {
           });
           break;
 
+        case "agent_error": {
+          const errData = data as { type: string; tick: number; error: string; detail: string };
+          dispatchWorldEvent(data as WorldEvent);
+          addChatMessage({
+            id: nextChatMsgId(),
+            role: "error",
+            content: `Agent error: ${errData.error}`,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
         case "agent_user_message":
           dispatchWorldEvent(data as WorldEvent);
           break;

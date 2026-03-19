@@ -54,6 +54,8 @@ interface MissionState {
   zones: Record<string, ZoneClientState>;
   selectedZoneIds: string[];
   drawingZonePoly: LatLonTuple[];
+  // Zones drawn before mission start — held locally, registered after define_map
+  pendingZones: Array<{ points: LatLonTuple[]; color: string }>;
 
   chatMessages: ChatMessage[];
   agentRunning: boolean;
@@ -78,6 +80,7 @@ const initialState: MissionState = {
   zones: {},
   selectedZoneIds: [],
   drawingZonePoly: [],
+  pendingZones: [],
 
   chatMessages: [],
   agentRunning: true,
@@ -94,6 +97,8 @@ type Action =
   | { type: "SIM_CONFIRM_SURVIVORS" }
   | { type: "SIM_BACK" }
   | { type: "SET_DRAWING_ZONE_POLY"; points: LatLonTuple[] }
+  | { type: "PENDING_ZONE_ADD"; points: LatLonTuple[]; color: string }
+  | { type: "PENDING_ZONE_REMOVE"; index: number }
   | { type: "ZONE_ADDED"; zone: ZoneClientState }
   | { type: "ZONE_REMOVED"; zoneId: string }
   | { type: "ZONE_SELECT"; zoneId: string; additive: boolean }
@@ -147,6 +152,19 @@ function reducer(state: MissionState, action: Action): MissionState {
 
     case "SET_DRAWING_ZONE_POLY":
       return { ...state, drawingZonePoly: action.points };
+
+    case "PENDING_ZONE_ADD":
+      return {
+        ...state,
+        drawingZonePoly: [],
+        pendingZones: [...state.pendingZones, { points: action.points, color: action.color }],
+      };
+
+    case "PENDING_ZONE_REMOVE":
+      return {
+        ...state,
+        pendingZones: state.pendingZones.filter((_, i) => i !== action.index),
+      };
 
     case "ZONE_ADDED":
       return { ...state, zones: { ...state.zones, [action.zone.zone_id]: action.zone }, drawingZonePoly: [] };
@@ -277,6 +295,8 @@ interface MissionContextValue {
   simConfirmSurvivors: () => void;
   simBack: () => void;
   setDrawingZonePoly: (points: LatLonTuple[]) => void;
+  addPendingZone: (points: LatLonTuple[], color: string) => void;
+  removePendingZone: (index: number) => void;
   dispatchZoneAdded: (zone: ZoneClientState) => void;
   dispatchZoneRemoved: (zoneId: string) => void;
   selectZone: (zoneId: string, additive: boolean) => void;
@@ -308,6 +328,8 @@ export function MissionProvider({ children }: { children: ReactNode }) {
   const simConfirmSurvivors = useCallback(() => dispatch({ type: "SIM_CONFIRM_SURVIVORS" }), []);
   const simBack = useCallback(() => dispatch({ type: "SIM_BACK" }), []);
   const setDrawingZonePoly = useCallback((points: LatLonTuple[]) => dispatch({ type: "SET_DRAWING_ZONE_POLY", points }), []);
+  const addPendingZone = useCallback((points: LatLonTuple[], color: string) => dispatch({ type: "PENDING_ZONE_ADD", points, color }), []);
+  const removePendingZone = useCallback((index: number) => dispatch({ type: "PENDING_ZONE_REMOVE", index }), []);
   const dispatchZoneAdded = useCallback((zone: ZoneClientState) => dispatch({ type: "ZONE_ADDED", zone }), []);
   const dispatchZoneRemoved = useCallback((zoneId: string) => dispatch({ type: "ZONE_REMOVED", zoneId }), []);
   const selectZone = useCallback((zoneId: string, additive: boolean) => dispatch({ type: "ZONE_SELECT", zoneId, additive }), []);
@@ -330,7 +352,7 @@ export function MissionProvider({ children }: { children: ReactNode }) {
       state,
       enterSimMode, exitSimMode,
       simSetBase, simSetBoundary, simSetSurvivorCount, simConfirmSurvivors, simBack,
-      setDrawingZonePoly,
+      setDrawingZonePoly, addPendingZone, removePendingZone,
       dispatchZoneAdded, dispatchZoneRemoved, selectZone, deselectZone, clearZoneSelection, updateZonesFromSnapshot,
       dispatchMapDefined, dispatchMissionStarted, dispatchMissionEnded,
       dispatchTick, dispatchWorldEvent,

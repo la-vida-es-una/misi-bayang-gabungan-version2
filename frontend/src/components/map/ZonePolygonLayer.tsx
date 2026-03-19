@@ -15,9 +15,10 @@ import { useMission } from "../../hooks/useMission";
 import type { ZoneClientState } from "../../types/mission";
 
 export function ZonePolygonLayer({ map }: { map: L.Map }) {
-  const { state, selectZone, clearZoneSelection } = useMissionContext();
+  const { state, selectZone, clearZoneSelection, removePendingZone } = useMissionContext();
   const { scanZones, stopScanning, removeZone } = useMission();
   const layersRef = useRef<Record<string, L.Polygon>>({});
+  const pendingLayersRef = useRef<L.Polygon[]>([]);
   const contextMenuRef = useRef<L.Popup | null>(null);
 
   useEffect(() => {
@@ -108,6 +109,31 @@ export function ZonePolygonLayer({ map }: { map: L.Map }) {
     });
   }, [map, state.zones, state.selectedZoneIds]);
 
+  // Render pending zones (pre-start, stored locally)
+  useEffect(() => {
+    // Remove old pending layers
+    pendingLayersRef.current.forEach((l) => l.remove());
+    pendingLayersRef.current = [];
+
+    state.pendingZones.forEach((z, i) => {
+      if (z.points.length < 3) return;
+      const poly = L.polygon(z.points, {
+        color: z.color,
+        fillColor: z.color,
+        fillOpacity: 0.08,
+        weight: 2,
+        dashArray: "4 4",
+      }).addTo(map);
+      const label = `Zone ${String.fromCharCode(65 + i)} (pending)`;
+      poly.bindTooltip(label, { permanent: true, direction: "center", className: "zone-label-tooltip" });
+      poly.on("contextmenu", (e: L.LeafletMouseEvent) => {
+        L.DomEvent.preventDefault(e.originalEvent);
+        removePendingZone(i);
+      });
+      pendingLayersRef.current.push(poly);
+    });
+  }, [map, state.pendingZones, removePendingZone]);
+
   // Click on empty map to deselect
   useEffect(() => {
     const handler = () => {
@@ -124,6 +150,8 @@ export function ZonePolygonLayer({ map }: { map: L.Map }) {
     return () => {
       Object.values(layersRef.current).forEach((l) => l.remove());
       layersRef.current = {};
+      pendingLayersRef.current.forEach((l) => l.remove());
+      pendingLayersRef.current = [];
       contextMenuRef.current?.remove();
     };
   }, [map]);

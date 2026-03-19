@@ -17,6 +17,7 @@ const roleStyles: Record<string, { color: string; label: string; bg: string }> =
   tool_call: { color: "#44ffdd", label: "TOOL", bg: "rgba(68,255,221,0.05)" },
   tool_result: { color: "#88ff44", label: "RSLT", bg: "rgba(136,255,68,0.05)" },
   assistant: { color: "var(--success-color)", label: "AI", bg: "rgba(68,255,136,0.05)" },
+  error: { color: "var(--danger-color)", label: "ERR", bg: "rgba(255,68,68,0.08)" },
 };
 
 const defaultStyle = { color: "var(--text-secondary)", label: "SYS", bg: "rgba(255,255,255,0.03)" };
@@ -69,7 +70,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
 
 export function ChatPanel() {
   const { state } = useMissionContext();
-  const { promptAgent, stopAgent, resumeAgent } = useMission();
+  const { promptAgent, stopAgent, restartAgent } = useMission();
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -114,7 +115,7 @@ export function ChatPanel() {
             fontSize: "0.6rem",
             color: agentRunning ? "var(--success-color)" : "var(--warning-color)",
           }}>
-            {agentRunning ? "ACTIVE" : "PAUSED"}
+            {agentRunning ? "ACTIVE" : "STOPPED"}
           </span>
         </div>
       </div>
@@ -168,7 +169,7 @@ export function ChatPanel() {
           {agentRunning ? (
             <button
               onClick={stopAgent}
-              title="Stop AI"
+              title="Pause AI agent (drones keep current path)"
               style={{
                 background: "rgba(255,68,68,0.1)",
                 border: "1px solid var(--danger-color)",
@@ -180,12 +181,12 @@ export function ChatPanel() {
                 fontWeight: 700,
               }}
             >
-              STOP
+              PAUSE
             </button>
           ) : (
             <button
-              onClick={resumeAgent}
-              title="Resume AI"
+              onClick={restartAgent}
+              title="Restart AI agent with fresh conversation"
               style={{
                 background: "rgba(68,255,136,0.1)",
                 border: "1px solid var(--success-color)",
@@ -197,7 +198,7 @@ export function ChatPanel() {
                 fontWeight: 700,
               }}
             >
-              GO
+              RESTART
             </button>
           )}
           <button
