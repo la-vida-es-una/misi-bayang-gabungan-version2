@@ -9,21 +9,40 @@ Starts:
 from __future__ import annotations
 
 import contextlib
+import logging
+import os
 
-# from typing import AsyncIterator
-# Basedpyright Diagnostics:
-# 1. This type is deprecated as of Python 3.9; use "collections.abc.AsyncIterator" instead [reportDeprecated]
 from collections.abc import AsyncIterator
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from mission.receiver import router as mission_router
 from mcp_server.server import mcp
 
+load_dotenv()
+
+# ── Structured logging ────────────────────────────────────────────────────────
+# LOG_LEVEL env var controls verbosity: DEBUG, INFO (default), WARNING, ERROR
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+# Quiet down noisy third-party loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("langchain").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    logging.getLogger("sar").info(
+        "SAR Swarm Backend starting (LOG_LEVEL=%s)", _LOG_LEVEL
+    )
     yield
 
 
@@ -44,5 +63,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=False,
-        log_level="info",
+        log_level=_LOG_LEVEL.lower(),
     )

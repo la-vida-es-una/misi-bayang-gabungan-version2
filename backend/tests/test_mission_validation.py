@@ -13,8 +13,8 @@ Each validation proves one promise made by the system:
   V2  — The LLM never assumes. Every decision is grounded in tool output.
   V3  — Survivors can only be found, never extracted or lost.
   V4  — Battery recall is the agent's responsibility, not the world's.
-  V5  — Zone coverage is real. Pause only fires when area is actually scanned.
-  V6  — Multi-zone works. A second zone resumes cleanly after pause.
+  V5  — Zone coverage is real. Zone covered event fires only after full scan.
+  V6  — Multi-zone works. Multiple zones coexist; scanning is per-zone independent.
   V7  — The swarm is self-healing. A drone failure does not stop the mission.
   V8  — No hardcoded drone IDs. Fleet is discovered dynamically.
   V9  — The mission log (CoT) proves reasoning happened before action.
@@ -41,6 +41,7 @@ from world.models import (
     MissionPhase,
     MissionResumedEvent,
     SurvivorFoundEvent,
+    ZoneStatus,
 )
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -129,6 +130,15 @@ def run_ticks(engine: WorldEngine, max_ticks: int = 2000) -> list[dict[str, Any]
 
 def events_of(events: list[dict[str, Any]], type_: str) -> list[dict[str, Any]]:
     return [e for e in events if e.get("type") == type_]
+
+
+# ── Zone helpers ──────────────────────────────────────────────────────────────
+
+
+def add_scanning_zone(grid: Grid, zone_id: str, polygon: dict) -> None:
+    """Register a zone and immediately set it to SCANNING status."""
+    grid.add_zone(zone_id, polygon)
+    grid.set_zone_status(zone_id, ZoneStatus.SCANNING)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -455,7 +465,6 @@ class TestV4_BatteryRecall:
         engine.start()
 
         # Drain battery manually
-        state = engine.get_world_state()
         engine._drones["d1"].battery = 15.0
 
         # Agent calls move_to base (simulated)
@@ -479,199 +488,321 @@ class TestV4_BatteryRecall:
 
 # ═════════════════════════════════════════════════════════════════════════════
 # V5 — ZONE COVERAGE IS REAL
-# Promise: pause fires only after every cell in the zone is actually scanned.
+# Promise: zone_covered event fires only after every cell is actually scanned.
+#          Drone return-to-base is now AI-reasoned, not auto-triggered.
 # ═════════════════════════════════════════════════════════════════════════════
 
 
 class TestV5_ZoneCoverage:
     def test_zone_not_covered_without_scanning(self) -> None:
         grid = make_grid()
-        grid.set_zone(ZONE_1_POLYGON)
-        assert not grid.zone_fully_covered(), (
+        add_scanning_zone(grid, "z1", ZONE_1_POLYGON)
+        assert not grid.zone_fully_covered("z1"), (
             "Zone reported covered before any scanning. Coverage tracking is broken."
         )
 
     def test_coverage_increases_with_each_scan(self) -> None:
         grid = make_grid()
-        grid.set_zone(ZONE_1_POLYGON)
+        add_scanning_zone(grid, "z1", ZONE_1_POLYGON)
 
-        ratio_before = grid.coverage_ratio()
-        zone_cells = grid.all_zone_cells()
+        ratio_before = grid.coverage_ratio("z1")
+        zone_cells = grid.all_zone_cells("z1")
         if zone_cells:
             col, row = zone_cells[0]
             grid.mark_scanned(col, row, radius=2)
 
-        ratio_after = grid.coverage_ratio()
+        ratio_after = grid.coverage_ratio("z1")
         assert ratio_after >= ratio_before, "Coverage did not increase after scan."
 
-    def test_pause_only_fires_after_full_coverage_and_all_drones_home(self) -> None:
+    def test_zone_covered_event_fires_after_full_scan(self) -> None:
         """
-        MissionPausedEvent must only appear AFTER ZoneCoveredEvent
-        AND all drones have returned to base.
-        This is the core auto-pause contract.
+        ZoneCoveredEvent must fire after all zone cells are scanned.
+        In v2, there is no global auto-pause — the AI decides drone routing.
+        This test verifies coverage tracking triggers ZoneCoveredEvent correctly.
         """
         engine = make_engine(cell_size_m=5.0)  # larger cells → fewer cells in zone
         engine.add_drone("d1")
         engine.start()
 
-        grid = engine.grid
-        grid.set_zone(ZONE_1_POLYGON)
+        # Register and activate zone 1
+        add_scanning_zone(engine.grid, "z1", ZONE_1_POLYGON)
 
         # Force all zone cells covered by scanning from each cell
         all_events: list[dict[str, Any]] = []
-        for col, row in grid.all_zone_cells():
+        for col, row in engine.grid.all_zone_cells("z1"):
             engine._drones["d1"].col = col
             engine._drones["d1"].row = row
             scan_events = engine.thermal_scan("d1")
             all_events.extend(asdict(e) for e in scan_events)  # type: ignore[arg-type]
 
-        # Return drone to base
-        path_home = straight_line_path(
-            engine._drones["d1"].col,
-            engine._drones["d1"].row,
-            engine.base_col,
-            engine.base_row,
-        )
-        engine.assign_path("d1", path_home)
-        tick_events = run_ticks(engine, max_ticks=500)
-        all_events.extend(tick_events)
-
         zone_covered = events_of(all_events, "zone_covered")
-        mission_paused = events_of(all_events, "mission_paused")
-
-        assert len(zone_covered) >= 1, "ZoneCoveredEvent never fired."
-        assert len(mission_paused) >= 1, (
-            "MissionPausedEvent never fired even though zone is covered "
-            "and drone returned home."
+        assert len(zone_covered) >= 1, (
+            "ZoneCoveredEvent never fired even after all cells scanned."
         )
+        # The event must carry the correct zone_id
+        assert zone_covered[0]["zone_id"] == "z1"
 
-    def test_pause_does_not_fire_if_drone_not_at_base(self) -> None:
-        engine = make_engine()
+    def test_zone_status_becomes_completed_after_full_scan(self) -> None:
+        """ZoneStatus transitions to COMPLETED when all cells are scanned."""
+        engine = make_engine(cell_size_m=5.0)
         engine.add_drone("d1")
         engine.start()
 
-        grid = engine.grid
-        grid.set_zone(ZONE_1_POLYGON)
-        zone_cells = grid.all_zone_cells()
-        assert zone_cells, "ZONE_1_POLYGON produced no cells"
+        add_scanning_zone(engine.grid, "z1", ZONE_1_POLYGON)
 
-        for col, row in zone_cells:
-            grid.mark_scanned(col, row, radius=0)
+        for col, row in engine.grid.all_zone_cells("z1"):
+            engine._drones["d1"].col = col
+            engine._drones["d1"].row = row
+            engine.thermal_scan("d1")
 
-        # Mark zone covered internally but do NOT return drone to base
-        engine._zone_covered_fired = True
-        base_col, base_row = engine.base_col, engine.base_row
-        # Put drone somewhere that is NOT base
-        for col, row in zone_cells:
-            if col != base_col or row != base_row:
-                engine._drones["d1"].col = col
-                engine._drones["d1"].row = row
-                break
-
-        engine._drones["d1"].path = []
-
-        events = engine.step()
-        event_types = {asdict(e).get("type") for e in events}  # type: ignore[arg-type]
-
-        assert "mission_paused" not in event_types, (
-            "Mission paused while drone is still in the field. "
-            "Drone must return to base before pause triggers."
+        zone = engine.grid.get_zone("z1")
+        assert zone is not None
+        assert zone.status == ZoneStatus.COMPLETED, (
+            f"Zone status is {zone.status}, expected COMPLETED after full scan."
         )
+
+    def test_no_global_pause_on_zone_covered(self) -> None:
+        """
+        v2 design: ZoneCoveredEvent fires but the world keeps ticking.
+        There is no global mission_paused event — the AI decides what happens next.
+        """
+        engine = make_engine(cell_size_m=5.0)
+        engine.add_drone("d1")
+        engine.start()
+
+        add_scanning_zone(engine.grid, "z1", ZONE_1_POLYGON)
+
+        # Fully scan the zone
+        for col, row in engine.grid.all_zone_cells("z1"):
+            engine._drones["d1"].col = col
+            engine._drones["d1"].row = row
+            engine.thermal_scan("d1")
+
+        # World should still be RUNNING — no auto-pause
+        assert engine.phase == MissionPhase.RUNNING, (
+            "Engine auto-paused after zone covered. "
+            "v2 design: drone return-to-base is AI-reasoned, no global pause."
+        )
+
+        # World ticks continue after zone covered
+        tick_events = run_ticks(engine, max_ticks=5)
+        mission_paused = events_of(tick_events, "mission_paused")
+        assert len(mission_paused) == 0, (
+            "mission_paused event emitted — global pause was removed in v2."
+        )
+
+    def test_uncovered_zone_cells_shrinks_after_scan(self) -> None:
+        """uncovered_zone_cells() must decrease as scanning proceeds."""
+        grid = make_grid(cell_size_m=5.0)
+        add_scanning_zone(grid, "z1", ZONE_1_POLYGON)
+
+        before = len(grid.uncovered_zone_cells("z1"))
+        cells = grid.all_zone_cells("z1")
+        if cells:
+            col, row = cells[0]
+            grid.mark_scanned(col, row, radius=2)
+        after = len(grid.uncovered_zone_cells("z1"))
+        assert after <= before, "Uncovered cell count did not decrease after scan."
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # V6 — MULTI-ZONE MISSION
-# Promise: after pause, a new zone resumes the mission cleanly.
-#          Previous zone coverage does not bleed into new zone.
+# Promise: multiple zones coexist; coverage is tracked independently per zone.
+#          Zones can be added/removed/scanned at any time while running.
 # ═════════════════════════════════════════════════════════════════════════════
 
 
 class TestV6_MultiZone:
-    def test_new_zone_resets_coverage(self) -> None:
+    def test_two_zones_have_independent_coverage(self) -> None:
+        """
+        Scanning zone 1 must not affect zone 2's coverage ratio.
+        """
         grid = make_grid()
-        grid.set_zone(ZONE_1_POLYGON)
-        zone_1_cells = grid.all_zone_cells()
-        assert zone_1_cells, "ZONE_1_POLYGON produced no cells"
+        add_scanning_zone(grid, "z1", ZONE_1_POLYGON)
+        add_scanning_zone(grid, "z2", ZONE_2_POLYGON)
 
-        for col, row in zone_1_cells:
+        z1_cells = grid.all_zone_cells("z1")
+        assert z1_cells, "ZONE_1_POLYGON produced no cells"
+
+        # Fully scan zone 1
+        for col, row in z1_cells:
             grid.mark_scanned(col, row, radius=0)
 
-        assert grid.zone_fully_covered(), (
-            "Could not fully cover zone 1 even with per-cell scanning. "
-            "Coverage tracking is broken."
+        assert grid.zone_fully_covered("z1"), (
+            "Could not fully cover zone 1 even with per-cell scanning."
+        )
+        # Zone 2 must remain unaffected
+        assert not grid.zone_fully_covered("z2"), (
+            "Zone 2 reported covered after scanning only zone 1. "
+            "Coverage bled between zones."
+        )
+        assert grid.coverage_ratio("z2") == 0.0, (
+            "Zone 2 coverage ratio non-zero after scanning zone 1 only."
         )
 
-        grid.set_zone(ZONE_2_POLYGON)
-        assert grid.all_zone_cells(), "ZONE_2_POLYGON produced no cells"
-
-        assert not grid.zone_fully_covered(), (
-            "Zone 2 reported covered immediately after being set. "
-            "Coverage from zone 1 bled into zone 2."
-        )
-        assert grid.coverage_ratio() == 0.0
-
-    def test_zone_index_increments(self) -> None:
+    def test_multiple_zones_register_correctly(self) -> None:
         grid = make_grid()
-        assert grid.zone_index == 0
-        grid.set_zone(ZONE_1_POLYGON)
-        assert grid.zone_index == 1
-        grid.set_zone(ZONE_2_POLYGON)
-        assert grid.zone_index == 2
+        assert len(grid.get_all_zones()) == 0
 
-    def test_resume_after_pause_transitions_phase(self) -> None:
+        grid.add_zone("z1", ZONE_1_POLYGON)
+        assert len(grid.get_all_zones()) == 1
+
+        grid.add_zone("z2", ZONE_2_POLYGON)
+        assert len(grid.get_all_zones()) == 2
+
+    def test_zone_removal_works(self) -> None:
+        grid = make_grid()
+        grid.add_zone("z1", ZONE_1_POLYGON)
+        grid.add_zone("z2", ZONE_2_POLYGON)
+
+        removed = grid.remove_zone("z1")
+        assert removed, "remove_zone returned False for existing zone"
+        assert len(grid.get_all_zones()) == 1
+        assert "z1" not in grid.get_all_zones()
+        assert "z2" in grid.get_all_zones()
+
+    def test_zone_auto_label(self) -> None:
+        """Zones get auto-labels (Zone A, Zone B, ...) when none provided."""
+        grid = make_grid()
+        z1 = grid.add_zone("z1", ZONE_1_POLYGON)
+        z2 = grid.add_zone("z2", ZONE_2_POLYGON)
+
+        assert z1.label == "Zone A"
+        assert z2.label == "Zone B"
+
+    def test_custom_label_preserved(self) -> None:
+        grid = make_grid()
+        z = grid.add_zone("z1", ZONE_1_POLYGON, label="Alpha Sector")
+        assert z.label == "Alpha Sector"
+
+    def test_engine_start_scan_transitions_zone_to_scanning(self) -> None:
         engine = make_engine()
         engine.add_drone("d1")
-
-        engine.grid.set_zone(ZONE_1_POLYGON)
-        assert engine.grid.all_zone_cells(), "ZONE_1_POLYGON produced no cells"
-        grid = engine.grid
-
         engine.start()
-        assert engine.phase == MissionPhase.RUNNING
 
-        # Force covered + drone at base → pause
-        for col, row in grid.all_zone_cells():
-            grid.mark_scanned(col, row, radius=0)
-        engine._zone_covered_fired = True
-        engine._drones["d1"].col = engine.base_col
-        engine._drones["d1"].row = engine.base_row
-        engine._drones["d1"].path = []
-        engine.step()
+        engine.add_zone("z1", ZONE_1_POLYGON)
+        zone = engine.grid.get_zone("z1")
+        assert zone is not None
+        assert zone.status == ZoneStatus.IDLE
 
-        assert engine.phase == MissionPhase.PAUSED, (
-            f"Engine did not pause. Phase: {engine.phase}"
+        events = engine.start_scan(["z1"])
+        scan_started = [e for e in events if asdict(e).get("type") == "scan_started"]  # type: ignore[arg-type]
+        assert len(scan_started) == 1
+
+        assert zone.status == ZoneStatus.SCANNING
+
+    def test_engine_stop_scan_returns_zone_to_idle(self) -> None:
+        engine = make_engine()
+        engine.add_drone("d1")
+        engine.start()
+
+        engine.add_zone("z1", ZONE_1_POLYGON)
+        engine.start_scan(["z1"])
+
+        zone = engine.grid.get_zone("z1")
+        assert zone is not None
+        assert zone.status == ZoneStatus.SCANNING
+
+        events = engine.stop_scan(["z1"])
+        scan_stopped = [e for e in events if asdict(e).get("type") == "scan_stopped"]  # type: ignore[arg-type]
+        assert len(scan_stopped) == 1
+        assert zone.status == ZoneStatus.IDLE
+
+    def test_concurrent_zones_both_receive_scan_coverage(self) -> None:
+        """
+        When two zones are both SCANNING and a drone scans at a cell that
+        overlaps both zones, both zones' coverage should increase.
+        """
+        grid = make_grid()
+
+        # Create two overlapping zones
+        overlapping_poly_1 = {
+            "type": "Polygon",
+            "coordinates": [
+                [[1.0, 1.0], [10.0, 1.0], [10.0, 10.0], [1.0, 10.0], [1.0, 1.0]]
+            ],
+        }
+        overlapping_poly_2 = {
+            "type": "Polygon",
+            "coordinates": [
+                [[5.0, 5.0], [15.0, 5.0], [15.0, 15.0], [5.0, 15.0], [5.0, 5.0]]
+            ],
+        }
+        add_scanning_zone(grid, "z1", overlapping_poly_1)
+        add_scanning_zone(grid, "z2", overlapping_poly_2)
+
+        # Scan at a cell that is inside both zones
+        grid.mark_scanned(7, 7, radius=1)
+
+        assert grid.coverage_ratio("z1") > 0.0, (
+            "Zone 1 got no coverage from shared scan."
+        )
+        assert grid.coverage_ratio("z2") > 0.0, (
+            "Zone 2 got no coverage from shared scan."
         )
 
-        # Add zone 2 and resume
-        engine.grid.set_zone(ZONE_2_POLYGON)
-        assert engine.grid.all_zone_cells(), "ZONE_2_POLYGON produced no cells"
+    def test_mission_continues_running_with_multiple_zones(self) -> None:
+        """Adding multiple zones and scanning does not pause the mission."""
+        engine = make_engine(cell_size_m=5.0)
+        engine.add_drone("d1")
+        engine.start()
+
+        engine.add_zone("z1", ZONE_1_POLYGON)
+        engine.add_zone("z2", ZONE_2_POLYGON)
+        engine.start_scan(["z1", "z2"])
+
+        # Fully scan both zones
+        for col, row in engine.grid.all_zone_cells("z1"):
+            engine._drones["d1"].col = col
+            engine._drones["d1"].row = row
+            engine.thermal_scan("d1")
+
+        for col, row in engine.grid.all_zone_cells("z2"):
+            engine._drones["d1"].col = col
+            engine._drones["d1"].row = row
+            engine.thermal_scan("d1")
+
+        # Phase must still be RUNNING — no global pause in v2
+        assert engine.phase == MissionPhase.RUNNING, (
+            "Mission auto-paused after scanning multiple zones. "
+            "v2 does not support global auto-pause."
+        )
+
+    def test_world_ticks_keep_running_when_zone_covered(self) -> None:
+        """step() must keep ticking after a zone reaches full coverage."""
+        engine = make_engine(cell_size_m=5.0)
+        engine.add_drone("d1")
+        engine.start()
+
+        add_scanning_zone(engine.grid, "z1", ZONE_1_POLYGON)
+
+        # Fully scan zone 1
+        for col, row in engine.grid.all_zone_cells("z1"):
+            engine._drones["d1"].col = col
+            engine._drones["d1"].row = row
+            engine.thermal_scan("d1")
+
+        # World ticks still increment
+        tick_before = engine._tick
+        for _ in range(3):
+            engine.step()
+        tick_after = engine._tick
+
+        assert tick_after == tick_before + 3, (
+            f"World ticked {tick_after - tick_before} times, expected 3. "
+            "World clock must keep running after zone covered in v2."
+        )
+
+    def test_mission_resumed_event_emitted_on_start(self) -> None:
+        """engine.start() must emit MissionResumedEvent (no zone_index)."""
+        engine = make_engine()
+        engine.add_drone("d1")
 
         events = engine.start()
         resumed = [e for e in events if isinstance(e, MissionResumedEvent)]
 
+        assert len(resumed) == 1, "MissionResumedEvent not emitted on start."
         assert engine.phase == MissionPhase.RUNNING
-        assert len(resumed) == 1, "MissionResumedEvent not emitted on resume."
-
-    def test_world_ticks_stop_during_pause(self) -> None:
-        """step() must be a no-op when paused."""
-        engine = make_engine()
-        engine.add_drone("d1")
-        engine.grid.set_zone(ZONE_1_POLYGON)
-        engine.start()
-
-        # Force pause state directly
-        engine.phase = MissionPhase.PAUSED
-        engine._drones["d1"].path = [(3, 3), (4, 4)]  # drone has pending path
-
-        tick_before = engine._tick
-        engine.step()
-        engine.step()
-        tick_after = engine._tick
-
-        assert tick_after == tick_before, (
-            f"World ticked {tick_after - tick_before} times while PAUSED. "
-            "World clock must stop during pause."
-        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -891,8 +1022,9 @@ class TestV10_OfflineGuarantee:
         socket.socket = BlockedSocket  # type: ignore[misc]
         try:
             grid = make_grid()
-            grid.set_zone(ZONE_1_POLYGON)
-            cells = grid.all_zone_cells()
+            grid.add_zone("z1", ZONE_1_POLYGON)
+            grid.set_zone_status("z1", ZoneStatus.SCANNING)
+            cells = grid.all_zone_cells("z1")
             assert len(cells) >= 0  # may be 0 for very small zone at coarse grid
         finally:
             socket.socket = original_socket  # type: ignore[misc]

@@ -1,0 +1,9 @@
+{
+  "name": "sar-swarm-unit",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "test:watch": "bun test --watch"
+  }
+}

@@ -46,13 +46,22 @@ class Drone:
     path: list[tuple[int, int]] = field(default_factory=list)
 
 
+# ── Zone status ──────────────────────────────────────────────────────────────
+
+
+class ZoneStatus(str, Enum):
+    IDLE = "idle"  # zone exists but is not being scanned
+    SCANNING = "scanning"  # actively being scanned by drones
+    COMPLETED = "completed"  # 100% coverage reached
+
+
 # ── Mission phase ─────────────────────────────────────────────────────────────
+# Simplified: no PAUSED — zone lifecycle is per-zone, not global.
 
 
 class MissionPhase(str, Enum):
     PENDING = "pending"  # map defined, not yet started
-    RUNNING = "running"
-    PAUSED = "paused"  # zone covered + all drones at base
+    RUNNING = "running"  # world is ticking
     ENDED = "ended"
 
 
@@ -108,27 +117,55 @@ class DroneChargingEvent:
     battery: float = 0.0
 
 
+# ── Zone lifecycle events ────────────────────────────────────────────────────
+
+
+@dataclass
+class ZoneAddedEvent:
+    """A new search zone was registered on the grid."""
+
+    type: Literal["zone_added"] = "zone_added"
+    zone_id: str = ""
+    label: str = ""
+    zone_cells: int = 0
+
+
+@dataclass
+class ZoneRemovedEvent:
+    """A zone was removed from the grid."""
+
+    type: Literal["zone_removed"] = "zone_removed"
+    zone_id: str = ""
+
+
+@dataclass
+class ScanStartedEvent:
+    """One or more zones transitioned to scanning."""
+
+    type: Literal["scan_started"] = "scan_started"
+    zone_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ScanStoppedEvent:
+    """One or more zones stopped scanning (back to idle)."""
+
+    type: Literal["scan_stopped"] = "scan_stopped"
+    zone_ids: list[str] = field(default_factory=list)
+
+
 @dataclass
 class ZoneCoveredEvent:
-    """All cells in current zone have been scanned."""
+    """All cells in a specific zone have been scanned."""
 
     type: Literal["zone_covered"] = "zone_covered"
-    zone_index: int = 0
+    zone_id: str = ""
     total_cells: int = 0
-
-
-@dataclass
-class MissionPausedEvent:
-    """Zone covered AND all drones returned to base."""
-
-    type: Literal["mission_paused"] = "mission_paused"
-    zone_index: int = 0
 
 
 @dataclass
 class MissionResumedEvent:
     type: Literal["mission_resumed"] = "mission_resumed"
-    zone_index: int = 0
 
 
 @dataclass
@@ -139,6 +176,70 @@ class MissionEndedEvent:
     zones_completed: int = 0
 
 
+# ── Agent visibility events (streamed via SSE) ──────────────────────────────
+
+
+@dataclass
+class AgentThinkingEvent:
+    """LLM chain-of-thought reasoning text."""
+
+    type: Literal["agent_thinking"] = "agent_thinking"
+    tick: int = 0
+    content: str = ""
+
+
+@dataclass
+class AgentToolCallEvent:
+    """Agent invoked a tool."""
+
+    type: Literal["agent_tool_call"] = "agent_tool_call"
+    tick: int = 0
+    tool: str = ""
+    args: dict = field(default_factory=dict)
+
+
+@dataclass
+class AgentToolResultEvent:
+    """Tool returned a result to the agent."""
+
+    type: Literal["agent_tool_result"] = "agent_tool_result"
+    tick: int = 0
+    tool: str = ""
+    result: dict = field(default_factory=dict)
+
+
+@dataclass
+class AgentStoppedEvent:
+    """Agent loop was paused by user."""
+
+    type: Literal["agent_stopped"] = "agent_stopped"
+
+
+@dataclass
+class AgentResumedEvent:
+    """Agent loop was resumed."""
+
+    type: Literal["agent_resumed"] = "agent_resumed"
+
+
+@dataclass
+class AgentUserMessageEvent:
+    """User sent a message to the agent."""
+
+    type: Literal["agent_user_message"] = "agent_user_message"
+    content: str = ""
+
+
+@dataclass
+class AgentErrorEvent:
+    """An error occurred in the agent (LLM failure, tick crash, etc.)."""
+
+    type: Literal["agent_error"] = "agent_error"
+    tick: int = 0
+    error: str = ""
+    detail: str = ""  # full traceback or extended info
+
+
 WorldEvent = (
     DroneMovedEvent
     | DroneArrivedEvent
@@ -146,8 +247,18 @@ WorldEvent = (
     | BatteryLowEvent
     | OutOfBoundsRejectedEvent
     | DroneChargingEvent
+    | ZoneAddedEvent
+    | ZoneRemovedEvent
+    | ScanStartedEvent
+    | ScanStoppedEvent
     | ZoneCoveredEvent
-    | MissionPausedEvent
     | MissionResumedEvent
     | MissionEndedEvent
+    | AgentThinkingEvent
+    | AgentToolCallEvent
+    | AgentToolResultEvent
+    | AgentStoppedEvent
+    | AgentResumedEvent
+    | AgentUserMessageEvent
+    | AgentErrorEvent
 )

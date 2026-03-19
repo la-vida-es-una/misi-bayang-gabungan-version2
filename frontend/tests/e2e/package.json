@@ -1,0 +1,15 @@
+{
+  "name": "sar-swarm-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "bunx playwright test",
+    "test:headed": "bunx playwright test --headed",
+    "test:debug": "bunx playwright test --debug",
+    "report": "bunx playwright show-report report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "@types/node": "^20.0.0"
+  }
+}
