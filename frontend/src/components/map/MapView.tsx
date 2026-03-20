@@ -22,6 +22,8 @@ import type { LatLonTuple, SurvivorState } from "../../types/mission";
 import { MasterPolygonLayer } from "./MasterPolygonLayer";
 import { ZonePolygonLayer } from "./ZonePolygonLayer";
 import { DroneMarkerLayer } from "./DroneMarkerLayer";
+import { DroneTraceLayer } from "./DroneTraceLayer";
+import { ScanWaypointLayer } from "./ScanWaypointLayer";
 import { SurvivorMarkerLayer } from "./SurvivorMarkerLayer";
 import { BaseMarker } from "./BaseMarker";
 import { CoverageCanvas } from "./CoverageCanvas";
@@ -284,6 +286,8 @@ export function MapView() {
             <>
               <DroneMarkerLayer map={mapRef.current} drones={snapshot.drones} />
               <CoverageCanvas map={mapRef.current} snapshot={snapshot} />
+              <DroneTraceLayer map={mapRef.current} traces={state.droneTraces} />
+              <ScanWaypointLayer map={mapRef.current} waypoints={state.scanWaypoints} cellSizeDeg={snapshot.grid?.cell_size_m} />
             </>
           )}
           <SurvivorMarkerLayer map={mapRef.current} survivors={survivorSource} />

@@ -37,17 +37,21 @@ logging.getLogger("langchain").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
 
 
+mcp_app = mcp.http_app()
+
+
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logging.getLogger("sar").info(
         "SAR Swarm Backend starting (LOG_LEVEL=%s)", _LOG_LEVEL
     )
-    yield
+    async with mcp_app.lifespan(mcp_app):
+        yield
 
 
 app = FastAPI(title="SAR Swarm Backend", lifespan=lifespan)
 
-app.mount("/mcp", mcp.http_app())
+app.mount("/mcp", mcp_app)
 app.include_router(mission_router)
 
 

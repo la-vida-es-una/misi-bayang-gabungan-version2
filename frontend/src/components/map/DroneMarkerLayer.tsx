@@ -8,6 +8,11 @@ function batteryColor(pct: number): string {
   return "#ff4444";
 }
 
+function applyMoveTransition(marker: L.Marker) {
+  const el = marker.getElement();
+  if (el) el.style.transition = "transform 0.45s linear";
+}
+
 function droneIcon(id: string, drone: DroneState): L.DivIcon {
   const color = batteryColor(drone.battery);
   const label = id.replace(/[^0-9]/g, "") || id.slice(-1).toUpperCase();
@@ -52,11 +57,13 @@ export function DroneMarkerLayer({
       if (markersRef.current[id]) {
         markersRef.current[id].setLatLng(pos);
         markersRef.current[id].setIcon(droneIcon(id, drone));
+        applyMoveTransition(markersRef.current[id]);
       } else {
         const m = L.marker(pos, { icon: droneIcon(id, drone) })
           .addTo(map)
           .bindTooltip(id, { permanent: false, direction: "top" });
         markersRef.current[id] = m;
+        applyMoveTransition(m);
       }
     });
 

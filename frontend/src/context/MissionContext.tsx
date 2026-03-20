@@ -59,6 +59,11 @@ interface MissionState {
 
   chatMessages: ChatMessage[];
   agentRunning: boolean;
+
+  // Visualization: drone movement traces
+  droneTraces: Record<string, LatLonTuple[]>;
+  // Visualization: scan waypoint positions per drone
+  scanWaypoints: Record<string, LatLonTuple[]>;
 }
 
 const INITIAL_SIM_CONFIG: SimConfig = {
@@ -84,6 +89,9 @@ const initialState: MissionState = {
 
   chatMessages: [],
   agentRunning: true,
+
+  droneTraces: {},
+  scanWaypoints: {},
 };
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -113,6 +121,8 @@ type Action =
   | { type: "CHAT_MESSAGE"; message: ChatMessage }
   | { type: "AGENT_STOPPED" }
   | { type: "AGENT_RESUMED" }
+  | { type: "DRONE_TRACE_UPDATE"; droneId: string; pos: LatLonTuple }
+  | { type: "SCAN_WAYPOINT_ADD"; droneId: string; pos: LatLonTuple }
   | { type: "RESET" }
   | { type: "SIM_RESET" };
 
@@ -246,6 +256,18 @@ function reducer(state: MissionState, action: Action): MissionState {
     case "AGENT_RESUMED":
       return { ...state, agentRunning: true };
 
+    case "DRONE_TRACE_UPDATE": {
+      const MAX_TRACE = 500;
+      const prev = state.droneTraces[action.droneId] ?? [];
+      const updated = [...prev, action.pos].slice(-MAX_TRACE);
+      return { ...state, droneTraces: { ...state.droneTraces, [action.droneId]: updated } };
+    }
+
+    case "SCAN_WAYPOINT_ADD": {
+      const prev = state.scanWaypoints[action.droneId] ?? [];
+      return { ...state, scanWaypoints: { ...state.scanWaypoints, [action.droneId]: [...prev, action.pos] } };
+    }
+
     case "RESET":
       return initialState;
     case "SIM_RESET":
@@ -311,6 +333,8 @@ interface MissionContextValue {
   addChatMessage: (message: ChatMessage) => void;
   dispatchAgentStopped: () => void;
   dispatchAgentResumed: () => void;
+  dispatchDroneTraceUpdate: (droneId: string, pos: LatLonTuple) => void;
+  dispatchScanWaypointAdd: (droneId: string, pos: LatLonTuple) => void;
   reset: () => void;
   simReset: () => void;
 }
@@ -344,6 +368,8 @@ export function MissionProvider({ children }: { children: ReactNode }) {
   const addChatMessage = useCallback((message: ChatMessage) => dispatch({ type: "CHAT_MESSAGE", message }), []);
   const dispatchAgentStopped = useCallback(() => dispatch({ type: "AGENT_STOPPED" }), []);
   const dispatchAgentResumed = useCallback(() => dispatch({ type: "AGENT_RESUMED" }), []);
+  const dispatchDroneTraceUpdate = useCallback((droneId: string, pos: LatLonTuple) => dispatch({ type: "DRONE_TRACE_UPDATE", droneId, pos }), []);
+  const dispatchScanWaypointAdd = useCallback((droneId: string, pos: LatLonTuple) => dispatch({ type: "SCAN_WAYPOINT_ADD", droneId, pos }), []);
   const reset = useCallback(() => dispatch({ type: "RESET" }), []);
   const simReset = useCallback(() => dispatch({ type: "SIM_RESET" }), []);
 
@@ -357,6 +383,7 @@ export function MissionProvider({ children }: { children: ReactNode }) {
       dispatchMapDefined, dispatchMissionStarted, dispatchMissionEnded,
       dispatchTick, dispatchWorldEvent,
       addChatMessage, dispatchAgentStopped, dispatchAgentResumed,
+      dispatchDroneTraceUpdate, dispatchScanWaypointAdd,
       reset, simReset,
     }}>
       {children}

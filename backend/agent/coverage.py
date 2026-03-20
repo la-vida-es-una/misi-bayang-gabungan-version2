@@ -186,6 +186,55 @@ def generate_coverage_plan(
     return plan
 
 
+def partition_plan(
+    plan: CoveragePlan,
+    partition_index: int,
+    total_partitions: int,
+    grid: Grid | None = None,
+) -> CoveragePlan:
+    """
+    Select every Nth scan point from a coverage plan (interleaved partitioning).
+
+    For N drones on the same zone, drone k gets scan points at indices
+    k, k+N, k+2N, ...  This spatially distributes drones across the
+    boustrophedon pattern from the start.
+
+    Args:
+        plan: The full coverage plan to partition.
+        partition_index: This drone's index (0-based).
+        total_partitions: Total number of drones sharing the zone.
+        grid: If provided, uses _connect() for segment paths between
+              selected scan points; otherwise uses straight_line_path.
+
+    Returns:
+        A new CoveragePlan with the subset of scan points and recomputed
+        segments.  Returns an empty plan if this partition has no points.
+    """
+    if total_partitions <= 1:
+        return plan
+
+    selected = plan.scan_points[partition_index::total_partitions]
+    if not selected:
+        return CoveragePlan()
+
+    out = CoveragePlan()
+    # First segment is empty — caller prepends the approach path
+    out.segments.append([])
+    out.scan_points.append(selected[0])
+
+    for i in range(1, len(selected)):
+        prev = selected[i - 1]
+        curr = selected[i]
+        if grid is not None:
+            seg = _connect(prev, curr, grid)
+        else:
+            seg = straight_line_path(prev[0], prev[1], curr[0], curr[1])
+        out.segments.append(seg)
+        out.scan_points.append(curr)
+
+    return out
+
+
 # ── Legacy helper (flat path for backward compat / tests) ────────────────────
 
 

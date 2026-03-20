@@ -69,7 +69,7 @@ _state: dict[str, Any] = {
 # SSE broadcast queue — all subscribers share the same events
 _sse_queues: list[asyncio.Queue[str]] = []
 
-WORLD_TICK_INTERVAL = 1.0  # seconds — synced closer to agent tick for smoother movement
+WORLD_TICK_INTERVAL = float(os.getenv("WORLD_TICK_INTERVAL", "0.5"))
 
 
 # ── Pydantic request models ───────────────────────────────────────────────────
@@ -186,13 +186,15 @@ async def _sse_generator(queue: asyncio.Queue[str]) -> AsyncGenerator[str, None]
 async def _world_tick_loop(engine: WorldEngine) -> None:
     while True:
         try:
+            if engine.phase == MissionPhase.ENDED:
+                # Sync receiver state and broadcast final snapshot
+                _state["phase"] = MissionPhase.ENDED
+                _broadcast("tick", engine.get_world_state())
+                logger.info("World tick loop stopping — mission ended")
+                return
             events = engine.step()
             if events:
                 _broadcast_events(events)
-                # Also push to MCP event queue
-                from mcp_server.server import push_events
-
-                push_events(events)
             # Broadcast tick snapshot regardless (frontend uses for live positions)
             _broadcast("tick", engine.get_world_state())
         except Exception:
@@ -484,11 +486,6 @@ async def add_zone(req: ZoneAddRequest) -> dict[str, Any]:
         _broadcast_events(scan_events)
         logger.info("Auto-started scanning for %s (mission already running)", zone_id)
 
-    # Push to MCP event queue too
-    from mcp_server.server import push_events
-
-    push_events(events)
-
     # Return the zone info
     zone_data = engine.get_zones().get(zone_id, {})
     return {"ok": True, "zone_id": zone_id, "zone": zone_data}
@@ -506,10 +503,6 @@ async def remove_zone(req: ZoneRemoveRequest) -> dict[str, Any]:
         raise HTTPException(404, f"Zone not found: {req.zone_id}")
     _broadcast_events(events)
 
-    from mcp_server.server import push_events
-
-    push_events(events)
-
     return {"ok": True, "zone_id": req.zone_id}
 
 
@@ -525,10 +518,6 @@ async def scan_zones(req: ZoneScanRequest) -> dict[str, Any]:
     events = engine.start_scan(req.zone_ids)
     _broadcast_events(events)
 
-    from mcp_server.server import push_events
-
-    push_events(events)
-
     return {"ok": True, "scanning": req.zone_ids}
 
 
@@ -541,10 +530,6 @@ async def stop_scanning(req: ZoneScanRequest) -> dict[str, Any]:
 
     events = engine.stop_scan(req.zone_ids)
     _broadcast_events(events)
-
-    from mcp_server.server import push_events
-
-    push_events(events)
 
     return {"ok": True, "stopped": req.zone_ids}
 

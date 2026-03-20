@@ -17,46 +17,33 @@ Tool set:
     - move_to(drone_id, x, y)           → move drone to cell
     - thermal_scan(drone_id)            → scan at current position
     - get_battery_status(drone_id)      → battery query
-
-  Event polling:
-    - get_pending_events()              → drain events since last poll
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections import deque
 from dataclasses import asdict
 from typing import Any
 
 from fastmcp import FastMCP
 
 from agent.coverage import (
+    CoveragePlan,
     generate_coverage_plan,
+    partition_plan,
     truncate_plan_for_battery,
 )
 from agent.pathfinder import straight_line_path
-from world.engine import BATTERY_DRAIN_PER_MOVE, SCAN_RADIUS_CELLS, WorldEngine
-from world.models import WorldEvent, ZoneStatus
+from world.engine import BATTERY_DRAIN_PER_MOVE, BATTERY_LOW_THRESHOLD, SCAN_RADIUS_CELLS, WorldEngine
+from world.models import ZoneStatus
 
 mcp = FastMCP(name="sar-swarm")
 
 # Engine reference — injected at startup
 _engine: WorldEngine | None = None
 
-# Per-MCP-consumer event queue (separate from the engine's per-consumer buffers)
-_event_queue: deque[dict[str, Any]] = deque(maxlen=500)
-
-
 def init_mcp(engine: WorldEngine) -> None:
     global _engine
     _engine = engine
-
-
-def push_events(events: list[WorldEvent]) -> None:
-    """Called by the world tick loop after each step()."""
-    for e in events:
-        _event_queue.append(asdict(e))  # type: ignore[arg-type]
 
 
 # ── Strategic tools (LLM decides when to call) ──────────────────────────────
@@ -110,17 +97,14 @@ def get_zones() -> dict[str, Any]:
     return {"ok": True, "zones": zones, "count": len(zones)}
 
 
-@mcp.tool()
-def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
-    """
-    Assign a drone to systematically cover a zone using a boustrophedon
-    (lawn-mower) pattern.  Generates an optimal coverage plan with scan
-    waypoints.  The drone moves to each scan point and thermal_scan() is
-    called at each one via MCP.
+def _do_assign_drone_to_zone_with_plan(
+    drone_id: str, zone_id: str, plan: CoveragePlan, full_plan_size: int | None = None
+) -> dict[str, Any]:
+    """Internal: assign a drone to a zone using a pre-computed coverage plan.
 
-    Args:
-        drone_id: ID of the drone to assign.
-        zone_id: ID of the zone to cover.
+    This accepts an already-partitioned (or full) plan, handles battery
+    truncation, approach path, and scan-queue setup.  Used by both the
+    single-drone MCP tool and the fleet partitioning logic.
     """
     assert _engine is not None
     state = _engine.get_world_state()
@@ -128,22 +112,8 @@ def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
     if drone_state is None:
         return {"ok": False, "error": f"Unknown drone: {drone_id}"}
 
-    zone = _engine.grid.get_zone(zone_id)
-    if zone is None:
-        return {"ok": False, "error": f"Unknown zone: {zone_id}"}
-
-    if zone.status == ZoneStatus.IDLE:
-        _engine.start_scan([zone_id])
-    elif zone.status == ZoneStatus.COMPLETED:
-        return {"ok": False, "error": f"Zone {zone_id} already 100% covered"}
-
-    if zone.fully_covered:
-        return {"ok": False, "error": f"Zone {zone_id} fully covered"}
-
-    # Generate coverage plan
-    plan = generate_coverage_plan(_engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS)
     if plan.is_empty:
-        return {"ok": False, "error": "No uncovered cells in zone"}
+        return {"ok": False, "error": "No scan points in plan for this drone"}
 
     # Truncate plan for battery
     drone_pos = (drone_state["col"], drone_state["row"])
@@ -167,12 +137,10 @@ def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
     )
 
     # Build scan queue: list of (segment, scan_point) pairs
-    # First entry: approach + first segment → first scan point
     queue: list[tuple[list[tuple[int, int]], tuple[int, int]]] = []
     for i, sp in enumerate(safe_plan.scan_points):
         seg = safe_plan.segments[i] if i < len(safe_plan.segments) else []
         if i == 0:
-            # Prepend approach to the first segment
             seg = approach + seg
         queue.append((seg, sp))
 
@@ -186,16 +154,22 @@ def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
         first_seg, first_scan_pt = first_entry
         if first_seg:
             _engine.assign_path(drone_id, first_seg)
-        # Re-insert just the scan point (segment consumed, scan still pending)
-        _engine._lock.acquire()
-        try:
-            q = _engine._drone_scan_queue.setdefault(drone_id, [])
-            q.insert(0, ([], first_scan_pt))
-        finally:
-            _engine._lock.release()
+        else:
+            # Drone already at first scan point — inject synthetic arrival
+            from world.models import DroneArrivedEvent
+
+            _engine.inject_event(
+                DroneArrivedEvent(
+                    drone_id=drone_id,
+                    col=drone_state["col"],
+                    row=drone_state["row"],
+                )
+            )
+        _engine.push_scan_queue_entry(drone_id, ([], first_scan_pt), front=True)
 
     total_moves = safe_plan.total_moves + len(approach)
     battery_cost = total_moves * BATTERY_DRAIN_PER_MOVE
+    original_size = full_plan_size if full_plan_size is not None else len(plan.scan_points)
     return {
         "ok": True,
         "drone_id": drone_id,
@@ -203,7 +177,153 @@ def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
         "scan_points": len(safe_plan.scan_points),
         "total_moves": total_moves,
         "battery_cost_pct": round(battery_cost, 1),
-        "truncated": len(safe_plan.scan_points) < len(plan.scan_points),
+        "truncated": len(safe_plan.scan_points) < original_size,
+    }
+
+
+def _do_assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
+    """Internal: assign a single drone to a zone. Used by the MCP tool."""
+    assert _engine is not None
+
+    zone = _engine.grid.get_zone(zone_id)
+    if zone is None:
+        return {"ok": False, "error": f"Unknown zone: {zone_id}"}
+
+    if zone.status == ZoneStatus.IDLE:
+        _engine.start_scan([zone_id])
+    elif zone.status == ZoneStatus.COMPLETED:
+        return {"ok": False, "error": f"Zone {zone_id} already 100% covered"}
+
+    if zone.fully_covered:
+        return {"ok": False, "error": f"Zone {zone_id} fully covered"}
+
+    plan = generate_coverage_plan(_engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS)
+    if plan.is_empty:
+        return {"ok": False, "error": "No uncovered cells in zone"}
+
+    return _do_assign_drone_to_zone_with_plan(drone_id, zone_id, plan, len(plan.scan_points))
+
+
+@mcp.tool()
+def assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
+    """
+    Assign a drone to systematically cover a zone using a boustrophedon
+    (lawn-mower) pattern.  Generates an optimal coverage plan with scan
+    waypoints.  The drone moves to each scan point and thermal_scan() is
+    called at each one via MCP.
+
+    Args:
+        drone_id: ID of the drone to assign.
+        zone_id: ID of the zone to cover.
+    """
+    return _do_assign_drone_to_zone(drone_id, zone_id)
+
+
+@mcp.tool()
+def auto_assign_fleet() -> dict[str, Any]:
+    """
+    Automatically assign ALL idle drones to uncovered scanning zones.
+    Distributes drones evenly across zones that still need coverage.
+    All drones start moving simultaneously.
+
+    Use this instead of calling assign_drone_to_zone repeatedly.
+    This is the preferred way to deploy the fleet.
+    """
+    assert _engine is not None
+    state = _engine.get_world_state()
+    assignments = _engine.get_drone_assignments()
+
+    # Find idle drones (not already assigned, not charging, have battery)
+    idle_drones: list[str] = []
+    low_battery: list[str] = []
+    for did, d in state["drones"].items():
+        if assignments.get(did) is not None:
+            continue  # already assigned
+        if d["status"] == "charging":
+            continue
+        if d["battery"] < BATTERY_LOW_THRESHOLD:
+            low_battery.append(did)
+            continue
+        if d["path_remaining"] > 0:
+            continue  # still moving
+        idle_drones.append(did)
+
+    if not idle_drones:
+        return {
+            "ok": True,
+            "message": "No idle drones available",
+            "low_battery": low_battery,
+            "assigned": [],
+        }
+
+    # Find zones that need coverage
+    zones_data = _engine.get_zones()
+    target_zones: list[str] = []
+    for zid, z in zones_data.items():
+        if z.get("status") == "scanning" and z.get("coverage_ratio", 0) < 1.0:
+            target_zones.append(zid)
+
+    if not target_zones:
+        return {
+            "ok": True,
+            "message": "No zones need coverage",
+            "idle_drones": idle_drones,
+            "assigned": [],
+        }
+
+    # Pass 1: Group idle drones by target zone (round-robin assignment)
+    zone_drones: dict[str, list[str]] = {zid: [] for zid in target_zones}
+    for i, did in enumerate(idle_drones):
+        zid = target_zones[i % len(target_zones)]
+        zone_drones[zid].append(did)
+
+    # Pass 2: For each zone, generate ONE plan, partition among N drones
+    results: list[dict[str, Any]] = []
+    for zid, drones_for_zone in zone_drones.items():
+        if not drones_for_zone:
+            continue
+
+        zone = _engine.grid.get_zone(zid)
+        if zone is None:
+            for did in drones_for_zone:
+                results.append({"ok": False, "error": f"Unknown zone: {zid}"})
+            continue
+
+        if zone.status == ZoneStatus.IDLE:
+            _engine.start_scan([zid])
+        elif zone.status == ZoneStatus.COMPLETED:
+            for did in drones_for_zone:
+                results.append({"ok": False, "error": f"Zone {zid} already 100% covered"})
+            continue
+
+        if zone.fully_covered:
+            for did in drones_for_zone:
+                results.append({"ok": False, "error": f"Zone {zid} fully covered"})
+            continue
+
+        plan = generate_coverage_plan(_engine.grid, zid, scan_radius=SCAN_RADIUS_CELLS)
+        if plan.is_empty:
+            for did in drones_for_zone:
+                results.append({"ok": False, "error": "No uncovered cells in zone"})
+            continue
+
+        full_plan_size = len(plan.scan_points)
+        n = len(drones_for_zone)
+
+        for idx, did in enumerate(drones_for_zone):
+            part = partition_plan(plan, idx, n, grid=_engine.grid)
+            result = _do_assign_drone_to_zone_with_plan(did, zid, part, full_plan_size)
+            results.append(result)
+
+    assigned = [r for r in results if r.get("ok")]
+    failed = [r for r in results if not r.get("ok")]
+
+    return {
+        "ok": True,
+        "assigned": assigned,
+        "failed": failed,
+        "low_battery": low_battery,
+        "message": f"Assigned {len(assigned)} drones, {len(failed)} failed",
     }
 
 
@@ -289,7 +409,6 @@ def move_to(drone_id: str, x: int, y: int) -> dict[str, Any]:
 
     path = straight_line_path(drone_state["col"], drone_state["row"], x, y)
     events = _engine.assign_path(drone_id, path)
-    push_events(events)
 
     rejected = [
         asdict(e)  # type: ignore[arg-type]
@@ -319,7 +438,6 @@ def thermal_scan(drone_id: str) -> dict[str, Any]:
     """
     assert _engine is not None
     events = _engine.thermal_scan(drone_id)
-    push_events(events)
     found = [
         asdict(e)  # type: ignore[arg-type]
         for e in events
@@ -354,16 +472,3 @@ def get_battery_status(drone_id: str) -> dict[str, Any]:
     return {"ok": True, "drone_id": drone_id, "battery": round(battery, 2)}
 
 
-# ── Event polling ─────────────────────────────────────────────────────────────
-
-
-@mcp.tool()
-def get_pending_events() -> dict[str, Any]:
-    """
-    Return and clear all world events queued since last poll.
-    The agent polls this to detect: drone_arrived, battery_low,
-    survivor_found, zone_covered, scan_started, drone_charging.
-    """
-    events = list(_event_queue)
-    _event_queue.clear()
-    return {"ok": True, "events": events, "count": len(events)}

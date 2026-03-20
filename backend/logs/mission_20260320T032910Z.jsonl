@@ -1,0 +1,8 @@
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-20T03:29:10.890686+00:00"}
+{"kind": "cot", "tick": 0, "thought": "Mission: Scan zones for survivors.\nBase at cell (9, 12).\nDiscover the fleet and zones, then assign drones to coverage.", "ts": "2026-03-20T03:29:11.058863+00:00"}
+{"kind": "mission", "message": "Invoke error: Error code: 500 - {'error': {'code': 500, 'message': 'Failed to parse input at pos 41: ; {\"name\": \"get_zones\", \"parameters\": {}}; {\"name\": \"assign_drone_to_zone\", \"parameters\": {\"drone_id\": \"null\", \"zone_id\": \"null\"}}', 'type': 'server_error'}}", "ts": "2026-03-20T03:29:15.508968+00:00"}
+{"kind": "world_event", "tick": 3, "event": {"type": "zone_added", "zone_id": "zone_4b502a", "label": "Zone A", "zone_cells": 289}, "ts": "2026-03-20T03:29:21.510464+00:00"}
+{"kind": "world_event", "tick": 3, "event": {"type": "scan_started", "zone_ids": ["zone_4b502a"]}, "ts": "2026-03-20T03:29:21.510576+00:00"}
+{"kind": "cot", "tick": 3, "thought": "New zone added: zone_4b502a (Zone A). Assign idle drones.", "ts": "2026-03-20T03:29:21.512040+00:00"}
+{"kind": "tool_call", "tick": 3, "tool": "assign_drone_to_zone", "args": {"drone_id": "None", "zone_id": "zone_4b502a"}, "ts": "2026-03-20T03:29:22.163696+00:00"}
+{"kind": "mission", "message": "Invoke error: StructuredTool does not support sync invocation.", "ts": "2026-03-20T03:29:22.177029+00:00"}

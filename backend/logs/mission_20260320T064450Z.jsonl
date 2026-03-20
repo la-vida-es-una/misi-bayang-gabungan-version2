@@ -1,0 +1,17 @@
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-20T06:44:50.064772+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "list_drones", "args": {}, "ts": "2026-03-20T06:44:50.845433+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_zones", "args": {}, "ts": "2026-03-20T06:44:51.540312+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "auto_assign_fleet", "args": {}, "ts": "2026-03-20T06:44:52.205141+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_mission_status", "args": {}, "ts": "2026-03-20T06:44:55.213540+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "recall_drone", "args": {"drone_id": "drone_2"}, "ts": "2026-03-20T06:45:01.243418+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_mission_status", "args": {}, "ts": "2026-03-20T06:45:05.193988+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "auto_assign_fleet", "args": {}, "ts": "2026-03-20T06:45:09.084399+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_mission_status", "args": {}, "ts": "2026-03-20T06:45:12.009900+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "auto_assign_fleet", "args": {}, "ts": "2026-03-20T06:45:16.212197+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_mission_status", "args": {}, "ts": "2026-03-20T06:45:20.251828+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "auto_assign_fleet", "args": {}, "ts": "2026-03-20T06:45:23.280621+00:00"}
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-20T06:45:24.621020+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_mission_status", "args": {}, "ts": "2026-03-20T06:45:27.928006+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "list_drones", "args": {}, "ts": "2026-03-20T06:45:28.614559+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "auto_assign_fleet", "args": {}, "ts": "2026-03-20T06:45:35.782352+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_zones", "args": {}, "ts": "2026-03-20T06:45:36.635459+00:00"}

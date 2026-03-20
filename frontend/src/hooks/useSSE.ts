@@ -13,6 +13,7 @@ import type {
   AgentThinkingEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
+  LatLonTuple,
 } from "../types/mission";
 
 const SSE_URL = "/mission/stream";
@@ -26,9 +27,13 @@ export function useSSE(active: boolean) {
     dispatchAgentStopped,
     dispatchAgentResumed,
     updateZonesFromSnapshot,
+    dispatchDroneTraceUpdate,
+    dispatchScanWaypointAdd,
   } = useMissionContext();
 
   const esRef = useRef<EventSource | null>(null);
+  // Track last known positions for trace change detection
+  const lastPosRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     if (!active) {
@@ -57,6 +62,16 @@ export function useSSE(active: boolean) {
           // Sync zone coverage from snapshot
           if (snapshot.grid?.zones) {
             updateZonesFromSnapshot(snapshot.grid.zones as Record<string, { status: string; coverage_ratio: number; covered_cells: number; total_cells: number }>);
+          }
+          // Drone trace: append position when it changes
+          if (snapshot.drones) {
+            for (const [did, drone] of Object.entries(snapshot.drones)) {
+              const key = `${drone.lat},${drone.lon}`;
+              if (lastPosRef.current[did] !== key) {
+                lastPosRef.current[did] = key;
+                dispatchDroneTraceUpdate(did, [drone.lat, drone.lon] as LatLonTuple);
+              }
+            }
           }
           break;
         }
@@ -104,7 +119,7 @@ export function useSSE(active: boolean) {
           addChatMessage({
             id: nextChatMsgId(),
             role: "assistant_thinking",
-            content: thinkData.content,
+            content: `[tick ${thinkData.tick}] ${thinkData.content}`,
             timestamp: Date.now(),
           });
           break;
@@ -116,11 +131,20 @@ export function useSSE(active: boolean) {
           addChatMessage({
             id: nextChatMsgId(),
             role: "tool_call",
-            content: `${tcData.tool}(${JSON.stringify(tcData.args)})`,
+            content: `[tick ${tcData.tick}] ${tcData.tool}(${JSON.stringify(tcData.args)})`,
             timestamp: Date.now(),
             toolName: tcData.tool,
             toolArgs: tcData.args,
           });
+          // Record scan waypoint for visualization
+          if (tcData.tool === "thermal_scan" && tcData.args?.drone_id) {
+            const did = tcData.args.drone_id as string;
+            const pos = lastPosRef.current[did];
+            if (pos) {
+              const [lat, lon] = pos.split(",").map(Number);
+              dispatchScanWaypointAdd(did, [lat, lon] as LatLonTuple);
+            }
+          }
           break;
         }
 
@@ -130,7 +154,7 @@ export function useSSE(active: boolean) {
           addChatMessage({
             id: nextChatMsgId(),
             role: "tool_result",
-            content: JSON.stringify(trData.result),
+            content: `[tick ${trData.tick}] ${JSON.stringify(trData.result)}`,
             timestamp: Date.now(),
             toolName: trData.tool,
             toolResult: trData.result,
@@ -176,12 +200,34 @@ export function useSSE(active: boolean) {
           dispatchWorldEvent(data as WorldEvent);
           break;
 
+        case "survivor_found": {
+          const sfData = data as { survivor_id: string; drone_id: string };
+          dispatchWorldEvent(data as WorldEvent);
+          addChatMessage({
+            id: nextChatMsgId(),
+            role: "system",
+            content: `SURVIVOR ${sfData.survivor_id} found by ${sfData.drone_id}!`,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
+        case "battery_low": {
+          const blData = data as { drone_id: string; battery: number };
+          dispatchWorldEvent(data as WorldEvent);
+          addChatMessage({
+            id: nextChatMsgId(),
+            role: "system",
+            content: `WARNING: ${blData.drone_id} battery low at ${Math.round(blData.battery)}%`,
+            timestamp: Date.now(),
+          });
+          break;
+        }
+
         // Standard drone/world events
         case "drone_moved":
         case "drone_arrived":
         case "drone_charging":
-        case "battery_low":
-        case "survivor_found":
         case "out_of_bounds_rejected":
           dispatchWorldEvent(data as WorldEvent);
           break;
@@ -208,5 +254,7 @@ export function useSSE(active: boolean) {
     dispatchAgentStopped,
     dispatchAgentResumed,
     updateZonesFromSnapshot,
+    dispatchDroneTraceUpdate,
+    dispatchScanWaypointAdd,
   ]);
 }

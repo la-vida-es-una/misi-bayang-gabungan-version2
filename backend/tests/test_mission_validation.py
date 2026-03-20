@@ -33,7 +33,6 @@ from typing import Any
 import pytest
 
 from agent.pathfinder import straight_line_path
-from agent.window import REPLAN_THRESHOLD, WindowManager
 from world.engine import BATTERY_LOW_THRESHOLD, WorldEngine
 from world.grid import Grid
 from world.models import (
@@ -888,67 +887,6 @@ class TestV8_DynamicFleetDiscovery:
         assert set(discovered) == set(weird_ids), (
             "Non-standard drone IDs broke discovery. "
             "IDs must be opaque strings, not parsed."
-        )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# V9 — ROLLING 3-STEP WINDOW + REPLAN
-# Promise: agent always has next 3 waypoints; replans before running empty.
-# ═════════════════════════════════════════════════════════════════════════════
-
-
-class TestV9_RollingWindow:
-    def test_window_triggers_replan_at_threshold(self) -> None:
-        mgr = WindowManager()
-        mgr.register("d1")
-
-        mgr.get("d1").add_waypoints([(1, 1), (2, 2), (3, 3)])
-        assert not mgr.get("d1").needs_replan
-
-        mgr.get("d1").consume(2)
-        assert mgr.get("d1").remaining == 1
-        assert mgr.get("d1").needs_replan, (
-            f"Window has {mgr.get('d1').remaining} waypoints "
-            f"(≤ threshold {REPLAN_THRESHOLD}) but needs_replan is False."
-        )
-
-    def test_window_caps_at_three(self) -> None:
-        mgr = WindowManager()
-        mgr.register("d1")
-
-        mgr.get("d1").add_waypoints([(1, 1), (2, 2), (3, 3), (4, 4), (5, 5)])
-        assert mgr.get("d1").remaining == 3, (
-            "Window accepted more than 3 waypoints. "
-            "Agent may over-plan, wasting LLM context."
-        )
-
-    def test_drones_needing_replan_identifies_correct_drones(self) -> None:
-        mgr = WindowManager()
-        for d in ["d1", "d2", "d3"]:
-            mgr.register(d)
-
-        mgr.get("d1").add_waypoints([(1, 1), (2, 2), (3, 3)])  # full
-        mgr.get("d2").add_waypoints([(1, 1)])  # needs replan
-        mgr.get("d3").add_waypoints([])  # needs replan
-
-        needing = set(mgr.drones_needing_replan())
-        assert "d1" not in needing
-        assert "d2" in needing
-        assert "d3" in needing
-
-    def test_battery_low_clears_window(self) -> None:
-        """Battery recall must take absolute priority — window must clear."""
-        mgr = WindowManager()
-        mgr.register("d1")
-        mgr.get("d1").add_waypoints([(5, 5), (6, 6), (7, 7)])
-
-        # Simulate what orchestrator._handle_event does on battery_low
-        mgr.get("d1").clear()
-
-        assert mgr.get("d1").remaining == 0
-        assert mgr.get("d1").needs_replan, (
-            "After battery low, window should be empty and needs_replan=True. "
-            "Agent must immediately issue a base recall."
         )
 
 

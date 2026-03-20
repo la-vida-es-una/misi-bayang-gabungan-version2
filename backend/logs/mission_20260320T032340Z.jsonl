@@ -1,0 +1,3 @@
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-20T03:23:40.940662+00:00"}
+{"kind": "cot", "tick": 0, "thought": "Mission: Scan zones for survivors.\nBase at cell (12, 6).\nDiscover the fleet and zones, then assign drones to coverage.", "ts": "2026-03-20T03:23:41.150027+00:00"}
+{"kind": "mission", "message": "Invoke error: Error code: 500 - {'error': {'code': 500, 'message': 'Failed to parse input at pos 41: ; {\"name\": \"get_zones\", \"parameters\": {}}; {\"name\": \"assign_drone_to_zone\", \"parameters\": {\"drone_id\": \"null\", \"zone_id\": \"null\"}}', 'type': 'server_error'}}", "ts": "2026-03-20T03:23:45.904499+00:00"}

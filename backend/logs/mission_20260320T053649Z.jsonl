@@ -1,0 +1,5 @@
+{"kind": "mission", "message": "Mission start: Scan zones for survivors.", "ts": "2026-03-20T05:36:49.553624+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "list_drones", "args": {}, "ts": "2026-03-20T05:36:51.763494+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "get_zones", "args": {}, "ts": "2026-03-20T05:36:52.472587+00:00"}
+{"kind": "tool_call", "tick": 0, "tool": "auto_assign_fleet", "args": {}, "ts": "2026-03-20T05:36:53.148760+00:00"}
+{"kind": "mission", "message": "Invoke error: Error calling tool 'auto_assign_fleet': name 'BATTERY_LOW_THRESHOLD' is not defined", "ts": "2026-03-20T05:36:53.215610+00:00"}

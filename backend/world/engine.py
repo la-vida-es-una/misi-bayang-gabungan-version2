@@ -121,6 +121,11 @@ class WorldEngine:
         for buf in self._event_buffers.values():
             buf.extend(events)
 
+    def inject_event(self, event: WorldEvent) -> None:
+        """Push a synthetic event into all consumer buffers."""
+        with self._lock:
+            self._push_to_buffers([event])
+
     # ── Mission phase control ─────────────────────────────────────────────────
 
     def start(self) -> list[WorldEvent]:
@@ -337,11 +342,28 @@ class WorldEngine:
         with self._lock:
             return len(self._drone_scan_queue.get(drone_id, []))
 
+    def push_scan_queue_entry(
+        self,
+        drone_id: str,
+        entry: tuple[list[tuple[int, int]], tuple[int, int]],
+        front: bool = False,
+    ) -> None:
+        """Insert an entry into a drone's scan queue."""
+        with self._lock:
+            q = self._drone_scan_queue.setdefault(drone_id, [])
+            if front:
+                q.insert(0, entry)
+            else:
+                q.append(entry)
+
     def clear_drone_assignment(self, drone_id: str) -> None:
-        """Clear zone assignment and scan queue for a drone."""
+        """Clear zone assignment, scan queue, and reset drone to IDLE."""
         with self._lock:
             _ = self._drone_zone.pop(drone_id, None)
             _ = self._drone_scan_queue.pop(drone_id, None)
+            drone = self._drones.get(drone_id)
+            if drone is not None and drone.status == DroneStatus.SCANNING:
+                drone.status = DroneStatus.IDLE
 
     def recall_drone(self, drone_id: str) -> dict[str, Any]:
         """
@@ -505,33 +527,3 @@ class WorldEngine:
         with self._lock:
             return {zid: z.to_dict() for zid, z in self.grid.get_all_zones().items()}
 
-    def get_uncovered_cells(self, zone_id: str, max_cells: int = 10) -> list[dict]:  # pyright: ignore[reportMissingTypeArgument]
-        """Return sample of uncovered cells in a zone for LLM guidance."""
-        import random
-
-        with self._lock:
-            cells = self.grid.uncovered_zone_cells(zone_id)
-            if len(cells) > max_cells:
-                cells = random.sample(list(cells), max_cells)
-            return [{"col": c, "row": r} for c, r in cells]
-
-    def suggest_targets(self, zone_id: str, num_drones: int) -> list[dict]:  # pyright: ignore[reportMissingTypeArgument]
-        """Suggest well-spaced target positions for multiple drones."""
-        with self._lock:
-            cells = list(self.grid.uncovered_zone_cells(zone_id))
-            if not cells or num_drones <= 0:
-                return []
-            if len(cells) <= num_drones:
-                return [
-                    {"col": c, "row": r, "drone_index": i + 1}
-                    for i, (c, r) in enumerate(cells)
-                ]
-            step = len(cells) // num_drones
-            return [
-                {
-                    "col": cells[i * step][0],
-                    "row": cells[i * step][1],
-                    "drone_index": i + 1,
-                }
-                for i in range(num_drones)
-            ]

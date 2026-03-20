@@ -30,6 +30,7 @@ Token efficiency:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -42,7 +43,7 @@ from colorama import init as colorama_init
 from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
@@ -57,6 +58,8 @@ from agent.cot_logger import (
 from world.engine import WorldEngine
 from world.models import (
     AgentErrorEvent,
+    AgentResumedEvent,
+    AgentStoppedEvent,
     AgentThinkingEvent,
     AgentToolCallEvent,
     AgentToolResultEvent,
@@ -83,24 +86,35 @@ scan coverage of all designated search zones using autonomous rescue drones.
 AVAILABLE MCP TOOLS:
 - list_drones(): Discover drones (IDs, battery, status, zone assignment).
 - get_zones(): List zones with coverage percentages and status.
-- assign_drone_to_zone(drone_id, zone_id): Assign a drone to systematically \
-cover a zone.  Generates an optimal lawn-mower path with scan waypoints.  \
-The drone will move to each waypoint and thermal_scan() is called at each one.
+- auto_assign_fleet(): Assign ALL idle drones to scanning zones at once. \
+Distributes drones evenly.  ALL drones start moving simultaneously. \
+This is the PREFERRED tool for deploying drones — use it instead of \
+calling assign_drone_to_zone repeatedly.
+- assign_drone_to_zone(drone_id, zone_id): Assign ONE drone to a zone. \
+Only use this when you need precise control over a single assignment.
 - recall_drone(drone_id): Send a drone back to base for charging.
 - get_mission_status(): Overview with zone coverage and survivors found.
 
 RULES:
 1. ALWAYS call list_drones() and get_zones() first to discover the fleet.
 2. If NO zones exist, respond "Waiting for search zones" and STOP.
-3. Assign each idle drone to an uncovered zone using assign_drone_to_zone().
+3. Use auto_assign_fleet() to deploy all idle drones simultaneously.
 4. When battery_low is reported (<25%), IMMEDIATELY recall that drone.
-5. When a drone finishes charging (battery=100%), reassign it to a zone.
-6. When a zone reaches 100%, reassign its drones to remaining zones.
+5. When a drone finishes charging (battery=100%), use auto_assign_fleet().
+6. When a zone reaches 100%, use auto_assign_fleet() to redistribute.
 7. Mission is COMPLETE when all zones reach 100% and survivors are found.
 
+CRITICAL: Call exactly ONE tool at a time. Wait for its result before \
+calling the next tool.
+
 THINK STEP BY STEP before each action.  Explain your reasoning briefly.
-Example: "Drone_1 has 20% battery, so I am recalling it to base while \
-sending Drone_2 to the farther zone since it has 85% battery."
+Example: "Drone_1 has 20% battery, so I am recalling it to base. \
+The other drones have good battery, so I will deploy the fleet."
+
+IMPORTANT: After calling auto_assign_fleet() or assign_drone_to_zone(), STOP.
+Do NOT call get_mission_status() to verify. The mechanical tier handles scanning \
+autonomously. You will be notified when drones finish, need charging, or zones \
+reach 100%. Just call the assignment tool and end your turn.
 """
 
 # Strategic tools the LLM may call.  Mechanical tools (thermal_scan, move_to)
@@ -108,6 +122,7 @@ sending Drone_2 to the farther zone since it has 85% battery."
 STRATEGIC_TOOL_NAMES = {
     "list_drones",
     "get_zones",
+    "auto_assign_fleet",
     "assign_drone_to_zone",
     "recall_drone",
     "get_mission_status",
@@ -143,19 +158,9 @@ class CoTMiddleware(AgentMiddleware):
         self._tick = tick_ref
 
     def before_model(self, state: AgentState, runtime: Any) -> None:  # type: ignore[override]
-        tick = self._tick[0]
-        messages = state.get("messages", [])
-        if messages:
-            last = messages[-1]
-            content = getattr(last, "content", "")
-            if content:
-                log_reasoning(tick, str(content))
-                print(
-                    f"{Fore.YELLOW}[tick={tick}] thinking: {content[:200]}{Style.RESET_ALL}"
-                )
-                _broadcast_agent_event(
-                    AgentThinkingEvent(tick=tick, content=str(content))
-                )
+        # before_model fires with the input state — last message is the trigger
+        # (HumanMessage or ToolMessage). Nothing to broadcast here.
+        pass
 
     def after_model(self, state: AgentState, runtime: Any) -> None:  # type: ignore[override]
         tick = self._tick[0]
@@ -163,6 +168,19 @@ class CoTMiddleware(AgentMiddleware):
         if not messages:
             return
         last = messages[-1]
+        # Broadcast AI reasoning text (content without tool calls)
+        content = getattr(last, "content", "")
+        if (
+            content
+            and isinstance(last, AIMessage)
+            and not getattr(last, "tool_calls", [])
+        ):
+            log_reasoning(tick, str(content))
+            print(
+                f"{Fore.YELLOW}[tick={tick}] thinking: {str(content)[:200]}{Style.RESET_ALL}"
+            )
+            _broadcast_agent_event(AgentThinkingEvent(tick=tick, content=str(content)))
+        # Broadcast tool calls
         tool_calls = getattr(last, "tool_calls", [])
         for tc in tool_calls:
             name = tc.get("name", "?")
@@ -248,21 +266,42 @@ class CommandAgent:
             middleware=[CoTMiddleware(self._tick_ref)],
         )
 
-        # Initial invocation
+        # Initial invocation — start tick at 1 so initial tool calls don't log [tick 0]
+        self._tick_ref[0] = 1
         await self._invoke(
             f"Mission: {self.mission}\n"
-            f"Base at cell ({self.base_col}, {self.base_row}).\n"
-            "Discover the fleet and zones, then assign drones to coverage."
+            + f"Base at cell ({self.base_col}, {self.base_row}).\n"
+            + "Discover the fleet and zones, then assign drones to coverage."
         )
 
         while self._running:
             await asyncio.sleep(AGENT_TICK_SEC)
             if self._paused:
+                # User messages always wake the agent
                 user_msgs = self._drain_user_messages()
                 if user_msgs:
                     self._paused = False
+                    _broadcast_agent_event(AgentResumedEvent())
                     for msg in user_msgs:
                         await self._invoke(f"[User message] {msg}")
+                    continue
+                # Engine events also wake the agent (e.g. new zone added)
+                pending = self.engine.drain_events(AGENT_CONSUMER)
+                if pending:
+                    self._paused = False
+                    _broadcast_agent_event(AgentResumedEvent())
+                    # Pass pre-drained events into _agent_tick
+                    try:
+                        await self._agent_tick(pre_drained=pending)
+                    except Exception as exc:
+                        tb = traceback.format_exc()
+                        tick = self._tick_ref[0]
+                        logger.error("Agent tick %d failed:\n%s", tick, tb)
+                        print(f"{Fore.RED}[tick={tick}] agent error:\n{tb}{Style.RESET_ALL}")
+                        log_mission(f"Agent tick error: {exc}")
+                        _broadcast_agent_event(
+                            AgentErrorEvent(tick=tick, error=str(exc), detail=tb)
+                        )
                 continue
             try:
                 await self._agent_tick()
@@ -373,31 +412,106 @@ class CommandAgent:
                 logger.error("Mechanical move_to failed for %s: %s", drone_id, exc)
 
         # Re-push the scan point (move started, scan pending on arrival)
-        _ = self.engine._lock.acquire()
+        self.engine.push_scan_queue_entry(drone_id, ([], next_sp), front=True)
+
+    # ── Mechanical helpers ─────────────────────────────────────────────────────
+
+    async def _mechanical_auto_assign(self, tick: int) -> None:
+        """Call auto_assign_fleet via MCP when a new zone is added."""
+        assign_tool = self._tool_map.get("auto_assign_fleet")
+        if assign_tool is None:
+            return
         try:
-            q = self.engine._drone_scan_queue.setdefault(drone_id, [])
-            q.insert(0, ([], next_sp))
-        finally:
-            self.engine._lock.release()
+            result = await assign_tool.ainvoke({})
+            log_tool_call(tick, "auto_assign_fleet", {})
+            log_tool_result(tick, "auto_assign_fleet", {"result": str(result)[:200]})
+            _broadcast_agent_event(
+                AgentToolCallEvent(tick=tick, tool="auto_assign_fleet", args={})
+            )
+            _broadcast_agent_event(
+                AgentToolResultEvent(
+                    tick=tick, tool="auto_assign_fleet", result={"result": str(result)[:200]}
+                )
+            )
+            print(
+                f"{Fore.GREEN}[tick={tick}] mechanical: auto_assign_fleet() -> {str(result)[:120]}{Style.RESET_ALL}"
+            )
+        except Exception as exc:
+            logger.error("Mechanical auto_assign_fleet failed: %s", exc)
+
+    def _check_auto_pause(self, tick: int) -> None:
+        """Auto-pause when all zones are completed and no drones are active."""
+        zones_data = self.engine.get_zones()
+        if not zones_data:
+            return
+        all_done = all(
+            z.get("status") == "completed" for z in zones_data.values()
+        )
+        if not all_done:
+            return
+        # Verify no drones are still working
+        assignments = self.engine.get_drone_assignments()
+        any_assigned = any(z is not None for z in assignments.values())
+        if any_assigned:
+            return
+        # All zones done, no drones assigned — auto-pause
+        self._paused = True
+        log_mission("All zones completed — agent auto-paused, waiting for new zones")
+        print(
+            f"{Fore.MAGENTA}[tick={tick}] All zones 100% — agent paused, waiting for new zones{Style.RESET_ALL}"
+        )
+        _broadcast_agent_event(AgentStoppedEvent())
 
     # ── Event-driven agent tick ───────────────────────────────────────────────
 
-    async def _agent_tick(self) -> None:
+    async def _agent_tick(
+        self, pre_drained: list[WorldEvent] | None = None
+    ) -> None:
+        raw_events: list[WorldEvent] = (
+            pre_drained
+            if pre_drained is not None
+            else self.engine.drain_events(AGENT_CONSUMER)
+        )
+        user_msgs = self._drain_user_messages()
+
+        # Nothing to do — don't increment tick
+        if not raw_events and not user_msgs:
+            return
+
         self._tick_ref[0] += 1
         tick = self._tick_ref[0]
 
-        raw_events: list[WorldEvent] = self.engine.drain_events(AGENT_CONSUMER)
         events: list[dict[str, Any]] = [asdict(e) for e in raw_events]  # type: ignore[arg-type]
 
         for ev in events:
             log_event(tick, ev)
 
         # MECHANICAL TIER: handle scan-on-arrival for drones with pending scans
+        mechanically_handled: set[str] = set()
         for ev in events:
             if ev.get("type") == "drone_arrived":
                 did = ev.get("drone_id", "")
                 if self.engine.peek_scan_queue(did) > 0:
                     await self._mechanical_scan_and_advance(did)
+                    mechanically_handled.add(did)
+
+        # Fallback: catch drones that are idle with pending scans but no event
+        # (e.g. synthetic arrival event was missed or consumed elsewhere)
+        state = self.engine.get_world_state()
+        for did, d in state["drones"].items():
+            if (
+                did not in mechanically_handled
+                and d["status"] == "idle"
+                and d["path_remaining"] == 0
+                and self.engine.peek_scan_queue(did) > 0
+            ):
+                await self._mechanical_scan_and_advance(did)
+                mechanically_handled.add(did)
+
+        # MECHANICAL TIER: auto-assign idle drones on zone_added
+        has_zone_added = any(ev.get("type") == "zone_added" for ev in events)
+        if has_zone_added:
+            await self._mechanical_auto_assign(tick)
 
         # STRATEGIC TIER: build LLM triggers from remaining events
         triggers: list[str] = []
@@ -407,6 +521,9 @@ class CommandAgent:
 
             if etype == "drone_arrived":
                 did = ev.get("drone_id", "?")
+                # Skip drones the mechanical tier just handled
+                if did in mechanically_handled:
+                    continue
                 # Only trigger LLM if scan queue empty (coverage done)
                 if self.engine.peek_scan_queue(did) == 0:
                     triggers.append(
@@ -427,13 +544,12 @@ class CommandAgent:
                 zid = ev.get("zone_id", "?")
                 triggers.append(
                     f"Zone {zid} reached 100% coverage! "
-                    "Check if other zones still need coverage."
+                    + "Check if other zones still need coverage."
                 )
 
             elif etype == "zone_added":
-                zid = ev.get("zone_id", "?")
-                label = ev.get("label", "")
-                triggers.append(f"New zone added: {zid} ({label}). Assign idle drones.")
+                # Handled mechanically — don't trigger LLM
+                pass
 
             elif etype == "survivor_found":
                 sid = ev.get("survivor_id", "?")
@@ -449,15 +565,27 @@ class CommandAgent:
                         f"Drone {did} fully charged (100%). Ready for assignment."
                     )
 
-        user_msgs = self._drain_user_messages()
+        # Detect genuine completion: mechanical tier handled a drone that now
+        # has an empty scan queue AND no zone assignment → finished all scans
+        for did in mechanically_handled:
+            if (
+                self.engine.peek_scan_queue(did) == 0
+                and self.engine.get_drone_assignments().get(did) is None
+            ):
+                triggers.append(
+                    f"Drone {did} finished all scan points and is now idle. "
+                    + "Check zone coverage and reassign if needed."
+                )
+
         for msg in user_msgs:
             triggers.append(f"[User message] {msg}")
 
-        if not triggers:
-            return
+        if triggers:
+            prompt = "\n".join(triggers)
+            await self._invoke(prompt)
 
-        prompt = "\n".join(triggers)
-        await self._invoke(prompt)
+        # AUTO-PAUSE: all zones completed and no drones actively working
+        self._check_auto_pause(tick)
 
     def _drain_user_messages(self) -> list[str]:
         with self._user_msg_lock:
@@ -468,19 +596,15 @@ class CommandAgent:
     # ── Agent invocation (LLM via MCP tools) ──────────────────────────────────
 
     async def _invoke(self, user_message: str) -> None:
-        loop = asyncio.get_running_loop()
-
         input_messages: list[BaseMessage] = [
             *self._history,
             HumanMessage(content=user_message),
         ]
+        n_input = len(input_messages)
         agent_input: dict[str, list[BaseMessage]] = {"messages": input_messages}
 
         try:
-            result: dict[str, Any] = await loop.run_in_executor(
-                None,
-                lambda: self._agent.invoke(agent_input),  # pyright: ignore[reportArgumentType]
-            )
+            result: dict[str, Any] = await self._agent.ainvoke(agent_input)  # pyright: ignore[reportArgumentType]
         except Exception as exc:
             tb = traceback.format_exc()
             tick = self._tick_ref[0]
@@ -492,26 +616,43 @@ class CommandAgent:
             )
             return
 
-        out_messages: list[Any] = result.get("messages", [])
+        # Only process messages generated during this invocation (not input history)
+        all_messages: list[Any] = result.get("messages", [])
+        new_messages = all_messages[n_input:]
         tick = self._tick_ref[0]
 
-        for msg in out_messages:
-            tool_calls = getattr(msg, "tool_calls", [])
-            for tc in tool_calls:
-                name: str = tc.get("name", "?")
-                args: dict[str, Any] = tc.get("args", {})
-                log_tool_result(tick, name, args)
+        for msg in new_messages:
+            # Broadcast tool results (tool calls already broadcast by CoTMiddleware)
+            if isinstance(msg, ToolMessage):
+                tool_name: str = getattr(msg, "name", "?")
+                raw = msg.content
+                if isinstance(raw, str):
+                    try:
+                        result_data: dict[str, Any] = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        result_data = {"output": raw}
+                elif isinstance(raw, dict):
+                    result_data = raw
+                else:
+                    result_data = {"output": str(raw)}
+                log_tool_result(tick, tool_name, result_data)
                 _broadcast_agent_event(
-                    AgentToolResultEvent(tick=tick, tool=name, result=args)
+                    AgentToolResultEvent(tick=tick, tool=tool_name, result=result_data)
                 )
-                print(f"{Fore.GREEN}[tick={tick}] {name} -> {args}{Style.RESET_ALL}")
+                print(
+                    f"{Fore.GREEN}[tick={tick}] {tool_name} -> {result_data}{Style.RESET_ALL}"
+                )
 
             content = getattr(msg, "content", "")
-            if content and not tool_calls and isinstance(msg, AIMessage):
+            if (
+                content
+                and isinstance(msg, AIMessage)
+                and not getattr(msg, "tool_calls", [])
+            ):
                 logger.debug("[tick=%d] AI: %s", tick, content[:200])
 
         self._history.append(HumanMessage(content=user_message))
-        if out_messages:
-            last = out_messages[-1]
+        if new_messages:
+            last = new_messages[-1]
             self._history.append(AIMessage(content=getattr(last, "content", "")))
         self._history = self._history[-10:]
