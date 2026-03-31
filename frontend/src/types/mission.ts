@@ -157,6 +157,16 @@ export interface DroneChargingEvent {
   battery: number;
 }
 
+export interface DroneScannedEvent {
+  type: "drone_scanned";
+  drone_id: string;
+  col: number;
+  row: number;
+  survivors_found: string[];
+  zone_id: string | null;
+  coverage_ratio: number;
+}
+
 // Agent visibility events
 export interface AgentThinkingEvent {
   type: "agent_thinking";
@@ -169,6 +179,7 @@ export interface AgentToolCallEvent {
   tick: number;
   tool: string;
   args: Record<string, unknown>;
+  call_id?: string;
 }
 
 export interface AgentToolResultEvent {
@@ -176,6 +187,7 @@ export interface AgentToolResultEvent {
   tick: number;
   tool: string;
   result: Record<string, unknown>;
+  call_id?: string;
 }
 
 export interface AgentStoppedEvent {
@@ -201,6 +213,7 @@ export interface AgentErrorEvent {
 export type WorldEvent =
   | DroneMovedEvent
   | DroneArrivedEvent
+  | DroneScannedEvent
   | SurvivorFoundEvent
   | BatteryLowEvent
   | ZoneAddedEvent
@@ -239,6 +252,7 @@ export interface ChatMessage {
   toolName?: string;
   toolArgs?: Record<string, unknown>;
   toolResult?: Record<string, unknown>;
+  callId?: string;
 }
 
 // ── REST request/response types ───────────────────────────────────────────────

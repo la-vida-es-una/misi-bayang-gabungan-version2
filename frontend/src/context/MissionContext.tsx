@@ -56,6 +56,8 @@ interface MissionState {
   drawingZonePoly: LatLonTuple[];
   // Zones drawn before mission start — held locally, registered after define_map
   pendingZones: Array<{ points: LatLonTuple[]; color: string }>;
+  // Zones drawn during running mission — held locally until explicit apply
+  queuedZones: Array<{ points: LatLonTuple[]; color: string }>;
 
   chatMessages: ChatMessage[];
   agentRunning: boolean;
@@ -64,6 +66,10 @@ interface MissionState {
   droneTraces: Record<string, LatLonTuple[]>;
   // Visualization: scan waypoint positions per drone
   scanWaypoints: Record<string, LatLonTuple[]>;
+
+  // Simulator panel visibility toggles
+  showMissingSurvivors: boolean;
+  showSpawnRect: boolean;
 }
 
 const INITIAL_SIM_CONFIG: SimConfig = {
@@ -86,12 +92,16 @@ const initialState: MissionState = {
   selectedZoneIds: [],
   drawingZonePoly: [],
   pendingZones: [],
+  queuedZones: [],
 
   chatMessages: [],
   agentRunning: true,
 
   droneTraces: {},
   scanWaypoints: {},
+
+  showMissingSurvivors: true,
+  showSpawnRect: true,
 };
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -107,6 +117,9 @@ type Action =
   | { type: "SET_DRAWING_ZONE_POLY"; points: LatLonTuple[] }
   | { type: "PENDING_ZONE_ADD"; points: LatLonTuple[]; color: string }
   | { type: "PENDING_ZONE_REMOVE"; index: number }
+  | { type: "QUEUED_ZONE_ADD"; points: LatLonTuple[]; color: string }
+  | { type: "QUEUED_ZONE_REMOVE"; index: number }
+  | { type: "QUEUED_ZONES_CLEAR" }
   | { type: "ZONE_ADDED"; zone: ZoneClientState }
   | { type: "ZONE_REMOVED"; zoneId: string }
   | { type: "ZONE_SELECT"; zoneId: string; additive: boolean }
@@ -123,6 +136,8 @@ type Action =
   | { type: "AGENT_RESUMED" }
   | { type: "DRONE_TRACE_UPDATE"; droneId: string; pos: LatLonTuple }
   | { type: "SCAN_WAYPOINT_ADD"; droneId: string; pos: LatLonTuple }
+  | { type: "TOGGLE_SHOW_MISSING_SURVIVORS" }
+  | { type: "TOGGLE_SHOW_SPAWN_RECT" }
   | { type: "RESET" }
   | { type: "SIM_RESET" };
 
@@ -174,6 +189,25 @@ function reducer(state: MissionState, action: Action): MissionState {
       return {
         ...state,
         pendingZones: state.pendingZones.filter((_, i) => i !== action.index),
+      };
+
+    case "QUEUED_ZONE_ADD":
+      return {
+        ...state,
+        drawingZonePoly: [],
+        queuedZones: [...state.queuedZones, { points: action.points, color: action.color }],
+      };
+
+    case "QUEUED_ZONE_REMOVE":
+      return {
+        ...state,
+        queuedZones: state.queuedZones.filter((_, i) => i !== action.index),
+      };
+
+    case "QUEUED_ZONES_CLEAR":
+      return {
+        ...state,
+        queuedZones: [],
       };
 
     case "ZONE_ADDED":
@@ -236,7 +270,7 @@ function reducer(state: MissionState, action: Action): MissionState {
     case "MAP_DEFINED":
       return { ...state, mapDef: action.response };
     case "MISSION_STARTED":
-      return { ...state, phase: "running", agentRunning: true };
+      return { ...state, phase: "running", agentRunning: true, showSpawnRect: false };
     case "MISSION_ENDED":
       return { ...state, phase: "ended", agentRunning: false };
 
@@ -267,6 +301,11 @@ function reducer(state: MissionState, action: Action): MissionState {
       const prev = state.scanWaypoints[action.droneId] ?? [];
       return { ...state, scanWaypoints: { ...state.scanWaypoints, [action.droneId]: [...prev, action.pos] } };
     }
+
+    case "TOGGLE_SHOW_MISSING_SURVIVORS":
+      return { ...state, showMissingSurvivors: !state.showMissingSurvivors };
+    case "TOGGLE_SHOW_SPAWN_RECT":
+      return { ...state, showSpawnRect: !state.showSpawnRect };
 
     case "RESET":
       return initialState;
@@ -319,6 +358,9 @@ interface MissionContextValue {
   setDrawingZonePoly: (points: LatLonTuple[]) => void;
   addPendingZone: (points: LatLonTuple[], color: string) => void;
   removePendingZone: (index: number) => void;
+  addQueuedZone: (points: LatLonTuple[], color: string) => void;
+  removeQueuedZone: (index: number) => void;
+  clearQueuedZones: () => void;
   dispatchZoneAdded: (zone: ZoneClientState) => void;
   dispatchZoneRemoved: (zoneId: string) => void;
   selectZone: (zoneId: string, additive: boolean) => void;
@@ -335,6 +377,8 @@ interface MissionContextValue {
   dispatchAgentResumed: () => void;
   dispatchDroneTraceUpdate: (droneId: string, pos: LatLonTuple) => void;
   dispatchScanWaypointAdd: (droneId: string, pos: LatLonTuple) => void;
+  toggleShowMissingSurvivors: () => void;
+  toggleShowSpawnRect: () => void;
   reset: () => void;
   simReset: () => void;
 }
@@ -354,6 +398,9 @@ export function MissionProvider({ children }: { children: ReactNode }) {
   const setDrawingZonePoly = useCallback((points: LatLonTuple[]) => dispatch({ type: "SET_DRAWING_ZONE_POLY", points }), []);
   const addPendingZone = useCallback((points: LatLonTuple[], color: string) => dispatch({ type: "PENDING_ZONE_ADD", points, color }), []);
   const removePendingZone = useCallback((index: number) => dispatch({ type: "PENDING_ZONE_REMOVE", index }), []);
+  const addQueuedZone = useCallback((points: LatLonTuple[], color: string) => dispatch({ type: "QUEUED_ZONE_ADD", points, color }), []);
+  const removeQueuedZone = useCallback((index: number) => dispatch({ type: "QUEUED_ZONE_REMOVE", index }), []);
+  const clearQueuedZones = useCallback(() => dispatch({ type: "QUEUED_ZONES_CLEAR" }), []);
   const dispatchZoneAdded = useCallback((zone: ZoneClientState) => dispatch({ type: "ZONE_ADDED", zone }), []);
   const dispatchZoneRemoved = useCallback((zoneId: string) => dispatch({ type: "ZONE_REMOVED", zoneId }), []);
   const selectZone = useCallback((zoneId: string, additive: boolean) => dispatch({ type: "ZONE_SELECT", zoneId, additive }), []);
@@ -370,6 +417,8 @@ export function MissionProvider({ children }: { children: ReactNode }) {
   const dispatchAgentResumed = useCallback(() => dispatch({ type: "AGENT_RESUMED" }), []);
   const dispatchDroneTraceUpdate = useCallback((droneId: string, pos: LatLonTuple) => dispatch({ type: "DRONE_TRACE_UPDATE", droneId, pos }), []);
   const dispatchScanWaypointAdd = useCallback((droneId: string, pos: LatLonTuple) => dispatch({ type: "SCAN_WAYPOINT_ADD", droneId, pos }), []);
+  const toggleShowMissingSurvivors = useCallback(() => dispatch({ type: "TOGGLE_SHOW_MISSING_SURVIVORS" }), []);
+  const toggleShowSpawnRect = useCallback(() => dispatch({ type: "TOGGLE_SHOW_SPAWN_RECT" }), []);
   const reset = useCallback(() => dispatch({ type: "RESET" }), []);
   const simReset = useCallback(() => dispatch({ type: "SIM_RESET" }), []);
 
@@ -379,11 +428,13 @@ export function MissionProvider({ children }: { children: ReactNode }) {
       enterSimMode, exitSimMode,
       simSetBase, simSetBoundary, simSetSurvivorCount, simConfirmSurvivors, simBack,
       setDrawingZonePoly, addPendingZone, removePendingZone,
+      addQueuedZone, removeQueuedZone, clearQueuedZones,
       dispatchZoneAdded, dispatchZoneRemoved, selectZone, deselectZone, clearZoneSelection, updateZonesFromSnapshot,
       dispatchMapDefined, dispatchMissionStarted, dispatchMissionEnded,
       dispatchTick, dispatchWorldEvent,
       addChatMessage, dispatchAgentStopped, dispatchAgentResumed,
       dispatchDroneTraceUpdate, dispatchScanWaypointAdd,
+      toggleShowMissingSurvivors, toggleShowSpawnRect,
       reset, simReset,
     }}>
       {children}

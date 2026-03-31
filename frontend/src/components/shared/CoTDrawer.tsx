@@ -22,6 +22,82 @@ const roleStyles: Record<string, { color: string; label: string; bg: string }> =
 
 const defaultStyle = { color: "var(--text-secondary)", label: "SYS", bg: "rgba(255,255,255,0.03)" };
 
+/** Group consecutive tool_call + tool_result pairs by callId for display. */
+function groupMessages(messages: ChatMessage[]): Array<{ call: ChatMessage; result?: ChatMessage } | ChatMessage> {
+  const grouped: Array<{ call: ChatMessage; result?: ChatMessage } | ChatMessage> = [];
+  let i = 0;
+  while (i < messages.length) {
+    const msg = messages[i]!;
+    // If this is a tool_call with a callId, check if next message is its matching result
+    if (msg.role === "tool_call" && msg.callId && i + 1 < messages.length) {
+      const next = messages[i + 1]!;
+      if (next.role === "tool_result" && next.callId === msg.callId) {
+        grouped.push({ call: msg, result: next });
+        i += 2;
+        continue;
+      }
+    }
+    grouped.push(msg);
+    i++;
+  }
+  return grouped;
+}
+
+function isGrouped(item: { call: ChatMessage; result?: ChatMessage } | ChatMessage): item is { call: ChatMessage; result?: ChatMessage } {
+  return "call" in item;
+}
+
+function ToolCallGroup({ call, result }: { call: ChatMessage; result?: ChatMessage }) {
+  const callStyle = roleStyles["tool_call"] ?? defaultStyle;
+  const resultStyle = roleStyles["tool_result"] ?? defaultStyle;
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div style={{
+      background: callStyle.bg,
+      borderLeft: `2px solid ${callStyle.color}`,
+      padding: "6px 8px",
+      marginBottom: 4,
+      borderRadius: "0 4px 4px 0",
+      fontSize: "0.72rem",
+      lineHeight: 1.4,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+        <span style={{ color: callStyle.color, fontWeight: 700, fontSize: "0.62rem", letterSpacing: "0.06em" }}>
+          {callStyle.label}
+          {call.toolName && <span style={{ fontWeight: 400 }}> {call.toolName}</span>}
+          {result && (
+            <span style={{ color: resultStyle.color, marginLeft: 6, fontWeight: 400, fontSize: "0.58rem" }}>
+              OK
+            </span>
+          )}
+          {!result && (
+            <span style={{ color: "var(--warning-color)", marginLeft: 6, fontWeight: 400, fontSize: "0.58rem" }}>
+              pending...
+            </span>
+          )}
+        </span>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          style={{ background: "none", border: "none", color: callStyle.color, cursor: "pointer", fontSize: "0.62rem", padding: 0 }}
+        >
+          {expanded ? "collapse" : "expand"}
+        </button>
+      </div>
+      {expanded && (
+        <div style={{ fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          <div style={{ color: "var(--text-primary)" }}>{call.content}</div>
+          {result && (
+            <div style={{ color: resultStyle.color, marginTop: 4, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 4 }}>
+              {result.content}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   const style = roleStyles[msg.role] ?? defaultStyle;
   const [expanded, setExpanded] = useState(msg.role === "user" || msg.role === "system");
@@ -139,9 +215,13 @@ export function ChatPanel() {
               : "Start a mission to activate the AI agent."}
           </div>
         )}
-        {chatMessages.map((msg) => (
-          <MessageBubble key={msg.id} msg={msg} />
-        ))}
+        {groupMessages(chatMessages).map((item, i) =>
+          isGrouped(item) ? (
+            <ToolCallGroup key={item.call.id} call={item.call} result={item.result} />
+          ) : (
+            <MessageBubble key={item.id} msg={item} />
+          )
+        )}
         <div ref={bottomRef} />
       </div>
 

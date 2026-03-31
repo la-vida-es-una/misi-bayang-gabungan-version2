@@ -9,12 +9,8 @@ The grid.mark_scanned() uses a SQUARE scan pattern: for radius R, each scan
 covers a (2R+1) x (2R+1) square centred on the drone position.  With R=5,
 each scan covers an 11x11 = 121-cell area.
 
-Scan spacing along each sweep line = 2*R cells, ensuring adjacent scans
-overlap by 1 cell in the sweep direction.  Line spacing = 2*R cells between
-parallel scan lines, ensuring vertical overlap.
-
-For a typical 25x25 grid with R=5: ~3 scan lines × ~3 scans/line ≈ 9 total
-scan calls, connected by short move segments.  Total moves ≈ 85 cells.
+Spacing = ~70% of scan diameter in both directions, giving ~30% overlap
+between adjacent scans to eliminate diagonal gaps.
 """
 
 from __future__ import annotations
@@ -61,6 +57,7 @@ def generate_coverage_plan(
     grid: Grid,
     zone_id: str,
     scan_radius: int = 5,
+    claimed: np.ndarray | None = None,
 ) -> CoveragePlan:
     """
     Generate a boustrophedon coverage plan for uncovered cells of a zone.
@@ -69,20 +66,28 @@ def generate_coverage_plan(
     The drone moves through each segment cell-by-cell, then calls
     thermal_scan at the scan point, then moves to the next segment, etc.
 
-    Line spacing = 2 * scan_radius between parallel scan lines.
-    Scan spacing = 2 * scan_radius along each sweep line.
+    Args:
+        claimed: optional bool mask (rows, cols) of cells already claimed
+                 by other drones' scan queues — treated as covered.
     """
     zone = grid.get_zone(zone_id)
     if zone is None:
         return CoveragePlan()
 
     uncovered = zone.mask & ~zone.covered
+    if claimed is not None:
+        uncovered = uncovered & ~claimed
     if not uncovered.any():
         return CoveragePlan()
 
     rows, cols = zone.mask.shape
-    line_spacing = max(1, 2 * scan_radius)  # 10 for radius 5
-    scan_spacing = max(1, 2 * scan_radius)  # 10 for radius 5
+    # Overlap by ~30% to eliminate diagonal gaps between adjacent scans.
+    # With radius R, each scan covers 2R+1 cells.  Spacing = 2R+1 would be
+    # zero-overlap (touching edges).  We use ceil(0.7 * (2R+1)) so adjacent
+    # scans share ~30% of their width, guaranteeing full area coverage.
+    effective_diameter = 2 * scan_radius + 1
+    line_spacing = max(1, int(0.7 * effective_diameter))
+    scan_spacing = max(1, int(0.7 * effective_diameter))
 
     # Row range with uncovered cells
     row_has_uncovered = np.any(uncovered, axis=1)

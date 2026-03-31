@@ -169,6 +169,19 @@ class MissionResumedEvent:
 
 
 @dataclass
+class DroneScannedEvent:
+    """Engine auto-scanned at a waypoint — no MCP round-trip needed."""
+
+    type: Literal["drone_scanned"] = "drone_scanned"
+    drone_id: str = ""
+    col: int = 0
+    row: int = 0
+    survivors_found: list[str] = field(default_factory=list)
+    zone_id: str | None = None
+    coverage_ratio: float = 0.0
+
+
+@dataclass
 class MissionEndedEvent:
     type: Literal["mission_ended"] = "mission_ended"
     survivors_found: int = 0
@@ -196,6 +209,7 @@ class AgentToolCallEvent:
     tick: int = 0
     tool: str = ""
     args: dict = field(default_factory=dict)  # pyright: ignore[reportMissingTypeArgument]
+    call_id: str = ""
 
 
 @dataclass
@@ -206,6 +220,7 @@ class AgentToolResultEvent:
     tick: int = 0
     tool: str = ""
     result: dict = field(default_factory=dict)  # pyright: ignore[reportMissingTypeArgument]
+    call_id: str = ""
 
 
 @dataclass
@@ -243,6 +258,7 @@ class AgentErrorEvent:
 WorldEvent = (
     DroneMovedEvent
     | DroneArrivedEvent
+    | DroneScannedEvent
     | SurvivorFoundEvent
     | BatteryLowEvent
     | OutOfBoundsRejectedEvent

@@ -8,7 +8,6 @@
 import React from "react";
 import { useMissionContext } from "../../context/MissionContext";
 import { useMission } from "../../hooks/useMission";
-import { SimSurvivorsPanel } from "./SimSurvivorsPanel";
 import { DroneCard } from "../shared/DroneCard";
 
 const label: React.CSSProperties = {
@@ -29,8 +28,8 @@ const infoRow: React.CSSProperties = {
 
 export function MissionLivePanel() {
   const { state } = useMissionContext();
-  const { endMission, addZone, scanZones, stopScanning, removeZone, loading } = useMission();
-  const { snapshot, simulationMode, zones, selectedZoneIds, drawingZonePoly } = state;
+  const { endMission, addZone, scanZones, stopScanning, removeZone, applyQueuedZones, recallAll, loading } = useMission();
+  const { snapshot, simulationMode, zones, selectedZoneIds, drawingZonePoly, queuedZones } = state;
 
   const zoneList = Object.values(zones);
   const hasSelection = selectedZoneIds.length > 0;
@@ -167,13 +166,39 @@ export function MissionLivePanel() {
         </div>
       )}
 
+      {/* Queued zones - drawn during running mission */}
+      {queuedZones.length > 0 && (
+        <div className="glass" style={{ padding: 8 }}>
+          <div style={infoRow}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.78rem" }}>Queued zones</span>
+            <span style={{ color: "var(--warning-color)" }}>
+              {queuedZones.length} zone{queuedZones.length > 1 ? 's' : ''}
+            </span>
+          </div>
+          <button
+            className="btn"
+            style={{ fontSize: "0.68rem", padding: "5px", borderColor: "var(--accent-color)", color: "var(--accent-color)" }}
+            onClick={applyQueuedZones}
+            disabled={loading}
+          >
+            {loading ? "APPLYING..." : "APPLY QUEUED ZONES"}
+          </button>
+        </div>
+      )}
+
       {/* Drone cards */}
       {snapshot && Object.entries(snapshot.drones).map(([id, d]) => (
         <DroneCard key={id} id={id} drone={d} />
       ))}
 
-      {/* Sim survivors */}
-      {simulationMode && snapshot && <SimSurvivorsPanel snapshot={snapshot} />}
+      <button
+        className="btn"
+        style={{ borderColor: "var(--warning-color)", color: "var(--warning-color)" }}
+        disabled={loading}
+        onClick={recallAll}
+      >
+        RECALL ALL DRONES
+      </button>
 
       <button
         className="btn"

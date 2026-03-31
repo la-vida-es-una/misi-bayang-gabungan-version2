@@ -3,7 +3,7 @@ import L from "leaflet";
 import type { LatLonTuple } from "../../types/mission";
 
 const DRONE_COLORS = ["#44ff88", "#44aaff", "#ff44aa", "#ffaa44", "#aa44ff"];
-const SCAN_RADIUS_CELLS = 5;
+const SCAN_RADIUS_CELLS = 3;
 /** Approximate meters per degree of latitude */
 const DEG_TO_METERS = 111_320;
 
@@ -49,9 +49,10 @@ export function ScanWaypointLayer({
             radius: radiusMeters,
             color,
             fillColor: color,
-            fillOpacity: 0.06,
-            weight: 1,
-            opacity: 0.25,
+            fillOpacity: 0.15,
+            weight: 2,
+            opacity: 0.5,
+            dashArray: "4 4",
           }).addTo(map)
         );
       } else {

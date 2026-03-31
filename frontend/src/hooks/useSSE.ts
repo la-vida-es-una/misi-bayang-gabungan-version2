@@ -135,6 +135,7 @@ export function useSSE(active: boolean) {
             timestamp: Date.now(),
             toolName: tcData.tool,
             toolArgs: tcData.args,
+            callId: tcData.call_id,
           });
           // Record scan waypoint for visualization
           if (tcData.tool === "thermal_scan" && tcData.args?.drone_id) {
@@ -158,6 +159,7 @@ export function useSSE(active: boolean) {
             timestamp: Date.now(),
             toolName: trData.tool,
             toolResult: trData.result,
+            callId: trData.call_id,
           });
           break;
         }
@@ -221,6 +223,25 @@ export function useSSE(active: boolean) {
             content: `WARNING: ${blData.drone_id} battery low at ${Math.round(blData.battery)}%`,
             timestamp: Date.now(),
           });
+          break;
+        }
+
+        case "drone_scanned": {
+          const dsData = data as {
+            drone_id: string;
+            col: number;
+            row: number;
+            survivors_found: string[];
+            zone_id: string | null;
+            coverage_ratio: number;
+          };
+          dispatchWorldEvent(data as WorldEvent);
+          // Record scan waypoint for visualization
+          const pos = lastPosRef.current[dsData.drone_id];
+          if (pos) {
+            const [lat, lon] = pos.split(",").map(Number);
+            dispatchScanWaypointAdd(dsData.drone_id, [lat, lon] as LatLonTuple);
+          }
           break;
         }
 

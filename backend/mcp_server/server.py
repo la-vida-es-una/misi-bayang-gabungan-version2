@@ -148,23 +148,15 @@ def _do_assign_drone_to_zone_with_plan(
     _engine.set_drone_zone(drone_id, zone_id)
     _engine.set_scan_queue(drone_id, queue)
 
-    # Start the drone moving: pop first entry, assign its segment
+    # Start the drone moving: pop first entry, assign its segment.
+    # If approach is empty (drone already at first scan point), leave
+    # the entry in the queue — _tick_drone's idle-scan-queue check
+    # will pick it up on the next tick.
     first_entry = _engine.pop_scan_queue(drone_id)
     if first_entry:
         first_seg, first_scan_pt = first_entry
         if first_seg:
             _engine.assign_path(drone_id, first_seg)
-        else:
-            # Drone already at first scan point — inject synthetic arrival
-            from world.models import DroneArrivedEvent
-
-            _engine.inject_event(
-                DroneArrivedEvent(
-                    drone_id=drone_id,
-                    col=drone_state["col"],
-                    row=drone_state["row"],
-                )
-            )
         _engine.push_scan_queue_entry(drone_id, ([], first_scan_pt), front=True)
 
     total_moves = safe_plan.total_moves + len(approach)
@@ -197,7 +189,10 @@ def _do_assign_drone_to_zone(drone_id: str, zone_id: str) -> dict[str, Any]:
     if zone.fully_covered:
         return {"ok": False, "error": f"Zone {zone_id} fully covered"}
 
-    plan = generate_coverage_plan(_engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS)
+    claimed = _engine.get_claimed_mask(zone_id, exclude_drone=drone_id)
+    plan = generate_coverage_plan(
+        _engine.grid, zone_id, scan_radius=SCAN_RADIUS_CELLS, claimed=claimed
+    )
     if plan.is_empty:
         return {"ok": False, "error": "No uncovered cells in zone"}
 
@@ -301,7 +296,17 @@ def auto_assign_fleet() -> dict[str, Any]:
                 results.append({"ok": False, "error": f"Zone {zid} fully covered"})
             continue
 
-        plan = generate_coverage_plan(_engine.grid, zid, scan_radius=SCAN_RADIUS_CELLS)
+        # Exclude all drones in this batch from claimed mask (they'll be
+        # partitioned from the same plan), but respect existing assignments.
+        claimed = _engine.get_claimed_mask(zid, exclude_drone=None)
+        # Un-claim cells for drones in this batch (they're being reassigned)
+        # — the claimed mask already excludes only one drone; for a batch
+        #   we just pass the first drone's exclusion since partition handles
+        #   intra-batch dedup.  For inter-batch (existing drones), claimed
+        #   mask correctly marks their cells.
+        plan = generate_coverage_plan(
+            _engine.grid, zid, scan_radius=SCAN_RADIUS_CELLS, claimed=claimed
+        )
         if plan.is_empty:
             for did in drones_for_zone:
                 results.append({"ok": False, "error": "No uncovered cells in zone"})

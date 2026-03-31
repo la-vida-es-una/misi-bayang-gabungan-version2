@@ -51,16 +51,26 @@ def log_reasoning(tick: int, thought: str) -> None:
     _emit({"kind": "cot", "tick": tick, "thought": thought})
 
 
-def log_tool_call(tick: int, tool: str, args: dict[str, Any]) -> None:
+def log_tool_call(
+    tick: int, tool: str, args: dict[str, Any], call_id: str = ""
+) -> None:
     """Log a tool call BEFORE it is dispatched."""
     _console.info("[tick=%d] CALL %s(%s)", tick, tool, args)
-    _emit({"kind": "tool_call", "tick": tick, "tool": tool, "args": args})
+    record: dict[str, Any] = {"kind": "tool_call", "tick": tick, "tool": tool, "args": args}
+    if call_id:
+        record["call_id"] = call_id
+    _emit(record)
 
 
-def log_tool_result(tick: int, tool: str, result: dict[str, Any]) -> None:
+def log_tool_result(
+    tick: int, tool: str, result: dict[str, Any], call_id: str = ""
+) -> None:
     """Log the result returned by a tool."""
     _console.info("[tick=%d] RESULT %s -> %s", tick, tool, result)
-    _emit({"kind": "tool_result", "tick": tick, "tool": tool, "result": result})
+    record: dict[str, Any] = {"kind": "tool_result", "tick": tick, "tool": tool, "result": result}
+    if call_id:
+        record["call_id"] = call_id
+    _emit(record)
 
 
 def log_event(tick: int, event: dict[str, Any]) -> None:

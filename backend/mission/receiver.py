@@ -625,16 +625,73 @@ async def restart_agent() -> dict[str, Any]:
 
 @router.post("/agent/prompt")
 async def prompt_agent(req: AgentPromptRequest) -> dict[str, Any]:
-    """Inject a user message into the agent and resume if paused."""
-    agent = _state.get("agent")
-    if agent is None:
-        raise HTTPException(400, "No active agent")
+    """Inject a user message into the agent.
 
-    from world.models import AgentUserMessageEvent
+    Auto-resumes if paused, auto-restarts if the agent task crashed.
+    This ensures the chat always works — the user never needs to click
+    RESTART manually just to send a message.
+    """
+    engine: WorldEngine | None = _state.get("engine")
+    if engine is None:
+        raise HTTPException(400, "No active mission")
+    if _state.get("phase") != MissionPhase.RUNNING:
+        raise HTTPException(400, "Mission is not running")
+
+    from world.models import AgentResumedEvent, AgentUserMessageEvent
 
     broadcast_event(AgentUserMessageEvent(content=req.message))
-    agent.inject_user_message(req.message)
+
+    agent = _state.get("agent")
+    agent_task: asyncio.Task[None] | None = _state.get("agent_task")
+
+    # If agent task is dead (crashed/cancelled), restart it automatically
+    if agent_task is None or agent_task.done():
+        logger.info("Agent task dead — auto-restarting for user prompt")
+        if agent is not None:
+            agent.stop()
+
+        broadcast_event(AgentResumedEvent())
+
+        mission_text = _state.get("mission_text", "Scan zones for survivors.")
+        loop = asyncio.get_running_loop()
+        new_task = loop.create_task(
+            _agent_loop(engine, mission_text, engine.base_col, engine.base_row),
+            name="agent_loop",
+        )
+
+        def _on_task_done(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and (exc := task.exception()):
+                logger.error("Task %s died:\n%s", task.get_name(),
+                             "".join(traceback.format_exception(exc)))
+
+        new_task.add_done_callback(_on_task_done)
+        _state["agent_task"] = new_task
+        # Wait briefly for the new agent to initialise before injecting message
+        await asyncio.sleep(0.3)
+        agent = _state.get("agent")
+
+    # Auto-unpause if agent is paused
+    if agent is not None and agent.is_paused:
+        agent.unpause()
+        broadcast_event(AgentResumedEvent())
+
+    if agent is not None:
+        agent.inject_user_message(req.message)
+
     return {"ok": True, "message": "queued"}
+
+
+@router.post("/recall_all")
+async def recall_all_drones() -> dict[str, Any]:
+    """Recall ALL drones to base for charging. Clears assignments and scan queues."""
+    engine: WorldEngine | None = _state.get("engine")
+    if engine is None:
+        raise HTTPException(400, "No active mission")
+
+    results: dict[str, Any] = {}
+    for drone_id in engine.list_drone_ids():
+        results[drone_id] = engine.recall_drone(drone_id)
+    return {"ok": True, "recalled": results}
 
 
 @router.get("/agent/health")

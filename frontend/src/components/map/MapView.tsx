@@ -27,6 +27,7 @@ import { ScanWaypointLayer } from "./ScanWaypointLayer";
 import { SurvivorMarkerLayer } from "./SurvivorMarkerLayer";
 import { BaseMarker } from "./BaseMarker";
 import { CoverageCanvas } from "./CoverageCanvas";
+import { SimulatorPanel } from "../shared/SimulatorPanel";
 
 const CENTER: L.LatLngExpression = [3.314, 117.591];
 const DEFAULT_ZOOM = 15;
@@ -246,7 +247,7 @@ export function MapView() {
   // ── Derive survivor source ─────────────────────────────────────────────────
   // Show survivors from tick snapshot when available.
   // Fall back to mapDef.survivors so they appear immediately after define_map.
-  const survivorSource: Record<string, SurvivorState> =
+  const allSurvivors: Record<string, SurvivorState> =
     snapshot?.survivors ??
     Object.fromEntries(
       (mapDef?.survivors ?? []).map((s) => [
@@ -254,6 +255,13 @@ export function MapView() {
         { col: 0, row: 0, lat: s.lat, lon: s.lon, status: s.status as "missing" | "found" },
       ])
     );
+
+  // Filter survivors based on visibility toggle
+  const survivorSource: Record<string, SurvivorState> = state.showMissingSurvivors
+    ? allSurvivors
+    : Object.fromEntries(
+        Object.entries(allSurvivors).filter(([, s]) => s.status === "found")
+      );
 
   // ── Derive base position ───────────────────────────────────────────────────
   // Real mode: use mapDef.base. Sim mode: use simConfig.base (already shown via simBaseMarkerRef).
@@ -275,7 +283,7 @@ export function MapView() {
 
       {mapRef.current && (
         <>
-          {state.simConfig.boundaryRect && (
+          {state.simConfig.boundaryRect && state.showSpawnRect && (
             <MasterPolygonLayer map={mapRef.current} points={state.simConfig.boundaryRect} color="#ffaa44" />
           )}
           <ZonePolygonLayer map={mapRef.current} />
@@ -292,6 +300,11 @@ export function MapView() {
           )}
           <SurvivorMarkerLayer map={mapRef.current} survivors={survivorSource} />
         </>
+      )}
+
+      {/* Simulator Panel - shown in simulation mode when mission is running or has snapshot */}
+      {state.simulationMode && (state.phase === "running" || snapshot) && (
+        <SimulatorPanel snapshot={snapshot} />
       )}
 
       {hint && (

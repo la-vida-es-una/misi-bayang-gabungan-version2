@@ -75,6 +75,8 @@ export function useMission() {
     dispatchAgentStopped,
     dispatchAgentResumed,
     addPendingZone,
+    addQueuedZone,
+    clearQueuedZones,
   } = useMissionContext();
 
   const { getMapBounds, getMap } = useMapRef();
@@ -192,29 +194,20 @@ export function useMission() {
   const addZone = useCallback(async (zonePoly: LatLonTuple[], label?: string) => {
     const color = getNextZoneColor(state);
 
-    // If mission hasn't started yet, store locally — will be registered after define_map
+    // If mission hasn't started yet, store as pending — will be registered after define_map
     if (state.phase === "pending_zone") {
       addPendingZone(zonePoly, color);
       return `pending_${state.pendingZones.length}`;
     }
 
-    // Mission is running — register with backend immediately
-    setLoading(true);
-    setError(null);
-    const body = { geojson_polygon: toGeoJSON(zonePoly), label: label ?? null };
-    const result = await post<ZoneAddResponse>("/mission/zone/add", body);
-    setLoading(false);
-    if (!result.ok) { setError(result.error); return null; }
+    // Mission is running — queue zone instead of immediate registration
+    if (state.phase === "running") {
+      addQueuedZone(zonePoly, color);
+      return `queued_${state.queuedZones.length}`;
+    }
 
-    const zoneClient: ZoneClientState = {
-      ...result.data.zone,
-      polygon: zonePoly,
-      color,
-      selected: false,
-    };
-    dispatchZoneAdded(zoneClient);
-    return result.data.zone_id;
-  }, [state, dispatchZoneAdded, addPendingZone]);
+    return null;
+  }, [state, addPendingZone, addQueuedZone]);
 
   // ── removeZone ────────────────────────────────────────────────────────────
 
@@ -224,6 +217,41 @@ export function useMission() {
     dispatchZoneRemoved(zoneId);
     return true;
   }, [dispatchZoneRemoved]);
+
+  // ── applyQueuedZones ──────────────────────────────────────────────────────
+
+  const applyQueuedZones = useCallback(async () => {
+    if (state.queuedZones.length === 0) {
+      return { applied: 0, zone_ids: [] };
+    }
+
+    setLoading(true);
+    setError(null);
+    const results: string[] = [];
+
+    for (const queued of state.queuedZones) {
+      const body = { geojson_polygon: toGeoJSON(queued.points), label: null };
+      const result = await post<ZoneAddResponse>("/mission/zone/add", body);
+
+      if (result.ok) {
+        const zoneClient: ZoneClientState = {
+          ...result.data.zone,
+          polygon: queued.points,
+          color: queued.color,
+          selected: false,
+        };
+        dispatchZoneAdded(zoneClient);
+        results.push(result.data.zone_id);
+      } else {
+        setError(result.error);
+        break;
+      }
+    }
+
+    clearQueuedZones();
+    setLoading(false);
+    return { applied: results.length, zone_ids: results };
+  }, [state.queuedZones, dispatchZoneAdded, clearQueuedZones]);
 
   // ── scanZones ─────────────────────────────────────────────────────────────
 
@@ -283,6 +311,20 @@ export function useMission() {
     return true;
   }, [addChatMessage]);
 
+  // ── recallAll ─────────────────────────────────────────────────────────────
+
+  const recallAll = useCallback(async () => {
+    const result = await post<{ ok: boolean; recalled: Record<string, unknown> }>("/mission/recall_all", {});
+    if (!result.ok) { setError(result.error); return false; }
+    addChatMessage({
+      id: nextChatMsgId(),
+      role: "system",
+      content: "All drones recalled to base.",
+      timestamp: Date.now(),
+    });
+    return true;
+  }, [addChatMessage]);
+
   // ── endMission ────────────────────────────────────────────────────────────
 
   const endMission = useCallback(async () => {
@@ -297,9 +339,9 @@ export function useMission() {
 
   return {
     loading, error,
-    startMission, addZone, removeZone,
+    startMission, addZone, removeZone, applyQueuedZones,
     scanZones, stopScanning,
     stopAgent, resumeAgent, restartAgent, promptAgent,
-    endMission,
+    recallAll, endMission,
   };
 }
